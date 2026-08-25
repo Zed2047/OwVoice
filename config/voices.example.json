@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "voices": [
+    {
+      "id": "ana",
+      "display_name": "安娜",
+      "hero": "Ana",
+      "locale": "zh-CN",
+      "mode": "finetuned",
+      "gpt_model": "models/ana/ana-gpt.ckpt",
+      "sovits_model": "models/ana/ana-sovits.pth",
+      "reference_audio": "models/ana/reference.wav",
+      "prompt_text": "请填写参考音频中实际说出的文字。",
+      "prompt_language": "zh",
+      "enabled": true
+    }
+  ]
+}
+

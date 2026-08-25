@@ -1,0 +1,33 @@
+# Python 环境与缓存
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 本地引擎与模型，不上传 GitHub
+GPT-SoVITS/
+engine/
+models/**/*.ckpt
+models/**/*.pth
+models/**/*.pt
+models/**/*.bin
+models/**/*.safetensors
+config/voices.local.json
+
+# 本地音频与输出
+outputs/
+*.wav
+*.mp3
+*.ogg
+*.flac
+*.m4a
+
+# 日志与本地配置
+logs/
+.env
+
+# 编辑器文件
+.vscode/
+.idea/
+
