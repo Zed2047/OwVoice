@@ -44,4 +44,5 @@ foreach ($required in @($pythonExe, $apiPy, $sovitsPath, $gptPath, $refWav)) {
 
 Write-Host "正在启动 GPT-SoVITS API：$gsvRoot"
 Write-Host "启动角色：$($voice.display_name)"
+Set-Location $gsvRoot
 & $pythonExe $apiPy -a 127.0.0.1 -p 9880 -s $sovitsPath -g $gptPath -dr $refWav -dt $refText -dl zh
