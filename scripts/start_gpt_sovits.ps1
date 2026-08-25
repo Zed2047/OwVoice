@@ -10,11 +10,32 @@ if ([string]::IsNullOrWhiteSpace($gsvRoot)) {
 
 $pythonExe = Join-Path $gsvRoot "runtime\python.exe"
 $apiPy = Join-Path $gsvRoot "api.py"
-$modelDir = Join-Path $parentDir "models"
-$sovitsPath = Join-Path $modelDir "mambo_e8_s352.pth"
-$gptPath = Join-Path $modelDir "mambo-e15.ckpt"
-$refWav = Join-Path $modelDir "refer.wav"
-$refText = "最近看大家都在讲自己的经历，球波也是忍不住了。"
+$configPath = Join-Path $projectDir "config\voices.local.json"
+
+if (-not (Test-Path $configPath)) {
+    throw "找不到人物配置：$configPath。请先复制 voices.example.json 为 voices.local.json。"
+}
+
+$config = Get-Content $configPath -Raw | ConvertFrom-Json
+$voice = $config.voices | Where-Object { $_.enabled -ne $false } | Select-Object -First 1
+if ($null -eq $voice) {
+    throw "voices.local.json 中没有启用的人物。"
+}
+
+function Resolve-VoicePath([string]$value) {
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $null
+    }
+    if ([System.IO.Path]::IsPathRooted($value)) {
+        return [System.IO.Path]::GetFullPath($value)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path $projectDir $value))
+}
+
+$sovitsPath = Resolve-VoicePath $voice.sovits_model
+$gptPath = Resolve-VoicePath $voice.gpt_model
+$refWav = Resolve-VoicePath $voice.reference_audio
+$refText = $voice.prompt_text
 
 foreach ($required in @($pythonExe, $apiPy, $sovitsPath, $gptPath, $refWav)) {
     if (-not (Test-Path $required)) {
@@ -23,5 +44,5 @@ foreach ($required in @($pythonExe, $apiPy, $sovitsPath, $gptPath, $refWav)) {
 }
 
 Write-Host "正在启动 GPT-SoVITS API：$gsvRoot"
+Write-Host "启动角色：$($voice.display_name)"
 & $pythonExe $apiPy -a 127.0.0.1 -p 9880 -s $sovitsPath -g $gptPath -dr $refWav -dt $refText -dl zh
-

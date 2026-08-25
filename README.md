@@ -56,9 +56,8 @@ OwVoice Backend
    python .\frontend\app.py
    ```
 
-默认后端地址是 `http://127.0.0.1:8765`，GPT-SoVITS 地址是 `http://127.0.0.1:9880`。可以通过环境变量 `OWVOICE_GSV_API` 和 `OWVOICE_API` 修改。
+默认后端地址是 `http://127.0.0.1:8765`，GPT-SoVITS 地址是 `http://127.0.0.1:9880`。启动脚本会先加载 `voices.local.json` 中第一个启用角色，之后由 OwVoice 后端按选择切换角色模型。可以通过环境变量 `OWVOICE_GSV_API` 和 `OWVOICE_API` 修改地址。
 
 ## 模型与版权说明
 
 本仓库不包含 GPT-SoVITS 引擎、模型权重、游戏原始语音或其他可能受版权保护的素材。使用者应自行确认训练数据、模型和生成音频的使用权限，并遵守相关法律法规。
-
