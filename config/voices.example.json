@@ -2,6 +2,19 @@
   "version": 1,
   "voices": [
     {
+      "id": "monk",
+      "display_name": "和尚 / 禅雅塔",
+      "hero": "Zenyatta",
+      "locale": "zh-CN",
+      "mode": "finetuned",
+      "gpt_model": "models/monk/monk-gpt.ckpt",
+      "sovits_model": "models/monk/monk-sovits.pth",
+      "reference_audio": "models/monk/reference.wav",
+      "prompt_text": "请填写参考音频中实际说出的文字。",
+      "prompt_language": "zh",
+      "enabled": true
+    },
+    {
       "id": "ana",
       "display_name": "安娜",
       "hero": "Ana",
@@ -13,7 +26,19 @@
       "prompt_text": "请填写参考音频中实际说出的文字。",
       "prompt_language": "zh",
       "enabled": true
+    },
+    {
+      "id": "doomfist",
+      "display_name": "铁拳",
+      "hero": "Doomfist",
+      "locale": "zh-CN",
+      "mode": "finetuned",
+      "gpt_model": "models/doomfist/doomfist-gpt.ckpt",
+      "sovits_model": "models/doomfist/doomfist-sovits.pth",
+      "reference_audio": "models/doomfist/reference.wav",
+      "prompt_text": "请填写参考音频中实际说出的文字。",
+      "prompt_language": "zh",
+      "enabled": true
     }
   ]
 }
-
