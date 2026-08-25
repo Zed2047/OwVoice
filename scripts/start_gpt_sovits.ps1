@@ -1,11 +1,10 @@
 $ErrorActionPreference = "Stop"
 $projectDir = Split-Path -Parent $PSScriptRoot
-$parentDir = Split-Path -Parent $projectDir
 
 # 发布版可以通过 OWVOICE_GSV_ROOT 指向用户自己安装的 GPT-SoVITS。
 $gsvRoot = $env:OWVOICE_GSV_ROOT
 if ([string]::IsNullOrWhiteSpace($gsvRoot)) {
-    $gsvRoot = Join-Path $parentDir "GPT-SoVITS"
+    $gsvRoot = Join-Path $projectDir "GPT-SoVITS"
 }
 
 $pythonExe = Join-Path $gsvRoot "runtime\python.exe"
