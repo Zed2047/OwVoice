@@ -1,24 +1,24 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 $projectDir = Split-Path -Parent $PSScriptRoot
 
-# 发布版可以通过 OWVOICE_GSV_ROOT 指向用户自己安装的 GPT-SoVITS。
+# The project-local GPT-SoVITS directory is used by default.
 $gsvRoot = $env:OWVOICE_GSV_ROOT
 if ([string]::IsNullOrWhiteSpace($gsvRoot)) {
     $gsvRoot = Join-Path $projectDir "GPT-SoVITS"
 }
 
-$pythonExe = Join-Path $gsvRoot "runtime\python.exe"
+$pythonExe = Join-Path $projectDir ".venv\Scripts\python.exe"
 $apiPy = Join-Path $gsvRoot "api.py"
 $configPath = Join-Path $projectDir "config\voices.local.json"
 
 if (-not (Test-Path $configPath)) {
-    throw "找不到人物配置：$configPath。请先复制 voices.example.json 为 voices.local.json。"
+    throw "Voice configuration not found: $configPath"
 }
 
-$config = Get-Content $configPath -Raw | ConvertFrom-Json
+$config = Get-Content $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $voice = $config.voices | Where-Object { $_.enabled -ne $false } | Select-Object -First 1
 if ($null -eq $voice) {
-    throw "voices.local.json 中没有启用的人物。"
+    throw "No enabled voice exists in voices.local.json."
 }
 
 function Resolve-VoicePath([string]$value) {
@@ -38,11 +38,12 @@ $refText = $voice.prompt_text
 
 foreach ($required in @($pythonExe, $apiPy, $sovitsPath, $gptPath, $refWav)) {
     if (-not (Test-Path $required)) {
-        throw "找不到所需文件：$required。请设置 OWVOICE_GSV_ROOT 或准备本地模型。"
+        throw "Required file not found: $required"
     }
 }
 
-Write-Host "正在启动 GPT-SoVITS API：$gsvRoot"
-Write-Host "启动角色：$($voice.display_name)"
+Write-Host "Starting GPT-SoVITS API: $gsvRoot"
+Write-Host "Voice: $($voice.display_name)"
 Set-Location $gsvRoot
-& $pythonExe $apiPy -a 127.0.0.1 -p 9880 -s $sovitsPath -g $gptPath -dr $refWav -dt $refText -dl zh
+$cutPunc = [string]::Concat([char]0xFF0C,[char]0x3002,[char]0xFF1F,[char]0xFF01,[char]0xFF1B,[char]0xFF1A,",.?!",[char]0x2026)
+& $pythonExe $apiPy -a 127.0.0.1 -p 9880 -s $sovitsPath -g $gptPath -dr $refWav -dt $refText -dl zh -cp $cutPunc

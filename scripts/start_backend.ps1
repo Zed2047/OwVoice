@@ -2,18 +2,17 @@ $ErrorActionPreference = "Stop"
 $projectDir = Split-Path -Parent $PSScriptRoot
 Set-Location $projectDir
 
-if (-not (Test-Path ".venv\Scripts\python.exe")) {
-    Write-Host "未找到虚拟环境，请先安装依赖："
-    Write-Host "py -m venv .venv"
-    Write-Host ".\.venv\Scripts\pip.exe install -r requirements.txt"
+$venvPython = Join-Path $projectDir ".venv\Scripts\python.exe"
+$launcher = Join-Path $projectDir "scripts\launch_backend.py"
+
+if (-not (Test-Path -LiteralPath $venvPython)) {
+    Write-Host "OwVoice Python environment not found. Run first-time setup first."
     exit 1
 }
+$pythonExe = $venvPython
 
-if (-not (Test-Path "config\voices.local.json")) {
-    Copy-Item "config\voices.example.json" "config\voices.local.json"
-    Write-Host "已创建 config\voices.local.json，请先填写模型和参考音频路径。"
-    exit 1
+if (-not (Test-Path -LiteralPath "config\voices.local.json")) {
+    throw "config\voices.local.json not found. Run first-time setup first."
 }
 
-& ".venv\Scripts\python.exe" -m uvicorn backend.server:app --host 127.0.0.1 --port 8765
-
+& $pythonExe $launcher

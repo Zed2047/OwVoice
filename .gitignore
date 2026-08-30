@@ -4,9 +4,20 @@ venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+*.bak
+*.tmp
 
-# 本地引擎与模型，不上传 GitHub
-GPT-SoVITS/
+# GPT-SoVITS 推理源码需要随项目维护；权重、缓存和运行文件不上传
+GPT-SoVITS/GPT_weights*/
+GPT-SoVITS/SoVITS_weights*/
+GPT-SoVITS/runtime/
+GPT-SoVITS/logs/
+GPT-SoVITS/output/
+GPT-SoVITS/TEMP/
+GPT-SoVITS/__pycache__/
+GPT-SoVITS/ffmpeg.exe
+GPT-SoVITS/ffprobe.exe
+GPT-SoVITS/tools/AP_BWE_main/24kto48k/g_24kto48k.zip
 engine/
 models/**/*.ckpt
 models/**/*.pth
@@ -14,9 +25,16 @@ models/**/*.pt
 models/**/*.bin
 models/**/*.safetensors
 config/voices.local.json
+.runtime/
+dist/
+release/
+OwVoice.exe
+_internal/
 
 # 本地音频与输出
 outputs/
+output/
+.cache/
 *.wav
 *.mp3
 *.ogg
@@ -30,4 +48,3 @@ logs/
 # 编辑器文件
 .vscode/
 .idea/
-

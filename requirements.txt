@@ -1,5 +1,13 @@
-fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
-requests>=2.32.0
-PySide6>=6.5.0
-
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.7.0+cu128
+torchaudio==2.7.0+cu128
+numpy==1.26.4
+fastapi==0.115.14
+uvicorn[standard]==0.34.3
+requests==2.32.4
+pydantic==2.10.6
+transformers==4.50.0
+PySide6==6.9.2
+PySide6_Addons==6.9.2
+PySide6_Essentials==6.9.2
+shiboken6==6.9.2

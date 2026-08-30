@@ -1,63 +1,92 @@
 # OwVoice
 
-OwVoice 是一个本地运行的《守望先锋》角色语音合成工具。它将前端界面、人物配置和 GPT-SoVITS 推理引擎解耦，支持在多个角色音色之间切换并生成 WAV 配音。
+OwVoice 是一个守望先锋角色本地语音合成工具，内置安娜、禅雅塔和末日铁拳三个角色，使用 GPT-SoVITS 进行本地推理。
 
-## 项目结构
+## 普通用户使用
 
-```text
-OwVoice/
-├─ backend/                 # 本地 HTTP 服务
-├─ frontend/                # PySide6 桌面前端
-├─ config/                  # 人物配置模板
-├─ scripts/                 # 启动脚本
-├─ models/                  # 本地模型目录，不提交模型文件
-├─ outputs/                 # 合成结果，不提交到仓库
-├─ requirements.txt
-└─ README.md
+### 1. 下载
+
+请从 GitHub 的 **Releases** 下载 `OwVoice-v*.zip`，不要下载页面上的 `Source code` 压缩包。
+
+将 ZIP 解压到一个有足够空间、并且有读写权限的目录，例如 `D:\OwVoice`。不建议解压到 `C:\Program Files` 等受保护目录。
+
+### 2. 使用前准备
+
+- Windows 10/11 64 位
+- Python 3.10 64 位，建议从 [python.org](https://www.python.org/downloads/windows/) 安装
+- NVIDIA 显卡及可用的 NVIDIA 驱动
+- 首次配置需要联网
+- 建议预留至少 5GB 可用空间
+
+本项目使用项目目录内的 `.venv` 虚拟环境运行，不需要 Anaconda。首次配置会安装 Python 依赖、下载 GPT-SoVITS 推理模型并准备 NLTK 资源。
+
+### 3. 首次配置
+
+1. 双击 `setup.bat`。
+2. 等待窗口显示 `Setup complete`。
+3. 配置完成后关闭窗口。
+
+首次配置因为要配置环境、下载模型，可能需要较长时间，请不要中途关闭窗口。
+之后使用时直接双击 `OwVoice.exe`，不需要再次运行配置脚本。
+
+### 4. 生成语音
+
+1. 选择角色。
+2. 输入配音文案。
+3. 拖动语速滑块，或点击倍率数字精确输入。语速范围为 `0.10x` 到 `3.00x`。
+4. 设置 WAV 文件名和输出目录。
+5. 点击“合成语音”。
+6. 合成完成后可以播放、打开文件或删除 WAV 文件。
+
+> 提示：首次启动通常需要约 15 秒加载语音引擎，请耐心等待。
+
+## 常见问题
+
+### 找不到 Python
+
+请安装 64 位 Python 3.10，并重新打开 `setup.bat`。如果电脑中安装了多个 Python，请确认 `py -3.10` 可以正常运行。
+
+### PyTorch、CUDA 或显卡错误
+
+请确认 NVIDIA 驱动正常，并使用支持 CUDA 的 NVIDIA 显卡。详细错误可查看 `logs` 目录中的日志文件。
+
+### 合成失败
+
+请先确认首次配置已经完成，然后查看：
+
+- `logs\gpt_sovits.error.log`
+- `logs\backend.error.log`
+- `logs\warmup.error.log`
+
+### 启动很慢
+
+首次启动需要加载模型和启动本地服务，等待时间较长属于正常现象。启动页会显示当前阶段和进度。
+
+## 发布包内容
+
+发布 ZIP 中包含：
+
+- `OwVoice.exe` 和运行文件
+- `setup.bat` 首次配置脚本
+- 三个角色模型和参考音频
+- GPT-SoVITS 推理代码
+- 配置模板和许可证说明
+
+普通用户不需要修改配置文件，也不需要直接运行 Python 文件。
+
+## 开发者构建
+
+```powershell
+.\scripts\build_exe.ps1
+.\scripts\build_release.ps1
 ```
 
-## 工作流程
+先构建 EXE，再生成 `dist\OwVoice-v*.zip`。开发诊断功能默认关闭，不进入用户界面。
 
-```text
-前端选择角色和文本
-        ↓
-OwVoice Backend
-        ↓
-切换角色 GPT/SoVITS 权重
-        ↓
-调用本机 GPT-SoVITS API
-        ↓
-返回 WAV 音频
-```
+## 版权与使用说明
 
-## 本地准备
+OwVoice 与暴雪娱乐没有官方关系。
 
-1. 安装 GPT-SoVITS，并确保其 API 监听 `http://127.0.0.1:9880`。
-2. 复制 `config/voices.example.json` 为 `config/voices.local.json`。
-3. 在 `voices.local.json` 中填写本机模型和参考音频路径。
-4. 安装依赖：
+本项目仅供学习和非商业二次创作使用。部分模型、参考音频、头像等素材来源于网络，相关权利归原作者或权利人所有。请勿将本项目及其素材用于商业用途或未经授权的公开传播，使用者需自行确认合规性。
 
-   ```powershell
-   py -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   pip install -r requirements.txt
-   ```
-
-5. 启动后端：
-
-   ```powershell
-   .\scripts\start_backend.ps1
-   ```
-
-6. 另开终端启动前端：
-
-   ```powershell
-   .\.venv\Scripts\Activate.ps1
-   python .\frontend\app.py
-   ```
-
-默认后端地址是 `http://127.0.0.1:8765`，GPT-SoVITS 地址是 `http://127.0.0.1:9880`。启动脚本会先加载 `voices.local.json` 中第一个启用角色，之后由 OwVoice 后端按选择切换角色模型。可以通过环境变量 `OWVOICE_GSV_API` 和 `OWVOICE_API` 修改地址。
-
-## 模型与版权说明
-
-本仓库不包含 GPT-SoVITS 引擎、模型权重、游戏原始语音或其他可能受版权保护的素材。使用者应自行确认训练数据、模型和生成音频的使用权限，并遵守相关法律法规。
+GPT-SoVITS 的许可证见项目中的 `LICENSE` 文件，第三方组件说明见 `THIRD_PARTY_NOTICES.md`。

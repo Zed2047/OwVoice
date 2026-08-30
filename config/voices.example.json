@@ -3,40 +3,52 @@
   "voices": [
     {
       "id": "monk",
-      "display_name": "和尚 / 禅雅塔",
+      "display_name": "禅雅塔",
+      "avatar": "assets/avatars/monk.png",
       "hero": "Zenyatta",
       "locale": "zh-CN",
       "mode": "finetuned",
-      "gpt_model": "models/monk/monk-gpt.ckpt",
-      "sovits_model": "models/monk/monk-sovits.pth",
+      "gpt_model": "models/monk/monk-gpt-expanded-v3-e10.ckpt",
+      "sovits_model": "models/monk/monk-sovits-emotion-focus-e9.pth",
       "reference_audio": "models/monk/reference.wav",
-      "prompt_text": "请填写参考音频中实际说出的文字。",
+      "prompt_text": "愿世人幸福。",
+      "prompt_texts": [
+        "愿世人幸福。"
+      ],
       "prompt_language": "zh",
       "enabled": true
     },
     {
       "id": "ana",
       "display_name": "安娜",
+      "avatar": "assets/avatars/ana.png",
       "hero": "Ana",
       "locale": "zh-CN",
       "mode": "finetuned",
-      "gpt_model": "models/ana/ana-gpt.ckpt",
-      "sovits_model": "models/ana/ana-sovits.pth",
+      "gpt_model": "models/ana/ana-gpt-curated-v2-e8.ckpt",
+      "sovits_model": "models/ana/ana-sovits-emotion-focus-e7.pth",
       "reference_audio": "models/ana/reference.wav",
-      "prompt_text": "请填写参考音频中实际说出的文字。",
+      "prompt_text": "一大把年纪不喜欢惊喜了。",
+      "prompt_texts": [
+        "一大把年纪不喜欢惊喜了。"
+      ],
       "prompt_language": "zh",
       "enabled": true
     },
     {
       "id": "doomfist",
-      "display_name": "铁拳",
+      "display_name": "末日铁拳",
+      "avatar": "assets/avatars/doomfist.png",
       "hero": "Doomfist",
       "locale": "zh-CN",
       "mode": "finetuned",
-      "gpt_model": "models/doomfist/doomfist-gpt.ckpt",
-      "sovits_model": "models/doomfist/doomfist-sovits.pth",
+      "gpt_model": "models/doomfist/doomfist-gpt-expanded-v3-e10.ckpt",
+      "sovits_model": "models/doomfist/doomfist-sovits-curated-v4-e7.pth",
       "reference_audio": "models/doomfist/reference.wav",
-      "prompt_text": "请填写参考音频中实际说出的文字。",
+      "prompt_text": "你不算差，但也不够好。",
+      "prompt_texts": [
+        "你不算差，但也不够好。"
+      ],
       "prompt_language": "zh",
       "enabled": true
     }
