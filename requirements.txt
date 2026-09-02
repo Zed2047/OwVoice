@@ -1,6 +1,6 @@
---extra-index-url https://download.pytorch.org/whl/cu128
-torch==2.7.0+cu128
-torchaudio==2.7.0+cu128
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.7.0+cpu
+torchaudio==2.7.0+cpu
 numpy==1.26.4
 fastapi==0.115.14
 uvicorn[standard]==0.34.3

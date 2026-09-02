@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import shutil
 import zipfile
 from pathlib import Path
@@ -15,22 +16,20 @@ TARGET_DIR = PROJECT_DIR / "GPT-SoVITS" / "GPT_SoVITS" / "pretrained_models"
 ENGINE_DIR = PROJECT_DIR / "GPT-SoVITS"
 TEXT_DIR = ENGINE_DIR / "GPT_SoVITS" / "text"
 DOWNLOAD_DIR = PROJECT_DIR / ".cache" / "setup-downloads"
-FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 G2PW_URL = "https://www.modelscope.cn/models/kamiorinn/g2pw/resolve/master/G2PWModel_1.1.zip"
+G2PW_SHA256 = "b116f6930a7ee55eef6576a8d8e14bf40c1106583439e8ae924b901512379c64"
+PRETRAINED_REVISION = "336b2ec4e8d4ac74740798dd40af44e74659ecaf"
 REQUIRED_FILES = (
-    TARGET_DIR / "s1v3.ckpt",
     TARGET_DIR / "chinese-hubert-base" / "config.json",
+    TARGET_DIR / "chinese-hubert-base" / "preprocessor_config.json",
+    TARGET_DIR / "chinese-hubert-base" / "pytorch_model.bin",
     TARGET_DIR / "chinese-roberta-wwm-ext-large" / "config.json",
-    TARGET_DIR / "fast_langdetect" / "lid.176.bin",
-    TARGET_DIR / "gsv-v4-pretrained" / "s2Gv4.pth",
-    TARGET_DIR / "gsv-v4-pretrained" / "vocoder.pth",
+    TARGET_DIR / "chinese-roberta-wwm-ext-large" / "pytorch_model.bin",
+    TARGET_DIR / "chinese-roberta-wwm-ext-large" / "tokenizer.json",
 )
 ALLOW_PATTERNS = [
-    "s1v3.ckpt",
     "chinese-hubert-base/**",
     "chinese-roberta-wwm-ext-large/**",
-    "gsv-v4-pretrained/s2Gv4.pth",
-    "gsv-v4-pretrained/vocoder.pth",
 ]
 
 
@@ -49,23 +48,12 @@ def download_file(url: str, target: Path) -> None:
                     handle.write(chunk)
 
 
-def ensure_ffmpeg() -> None:
-    ffmpeg = ENGINE_DIR / "ffmpeg.exe"
-    ffprobe = ENGINE_DIR / "ffprobe.exe"
-    if ffmpeg.is_file() and ffprobe.is_file():
-        return
-    archive = DOWNLOAD_DIR / "ffmpeg-essentials.zip"
-    if not archive.is_file():
-        download_file(FFMPEG_URL, archive)
-    print("Extracting ffmpeg...")
-    with zipfile.ZipFile(archive) as package:
-        names = package.namelist()
-        for filename, destination in (("ffmpeg.exe", ffmpeg), ("ffprobe.exe", ffprobe)):
-            matches = [name for name in names if name.endswith("/bin/" + filename)]
-            if not matches:
-                raise RuntimeError(f"ffmpeg archive does not contain {filename}")
-            with package.open(matches[0]) as source, destination.open("wb") as target:
-                shutil.copyfileobj(source, target)
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def ensure_g2pw() -> None:
@@ -75,6 +63,9 @@ def ensure_g2pw() -> None:
     archive = DOWNLOAD_DIR / "G2PWModel_1.1.zip"
     if not archive.is_file():
         download_file(G2PW_URL, archive)
+    digest = sha256_file(archive)
+    if digest != G2PW_SHA256:
+        raise RuntimeError(f"G2PW archive SHA256 mismatch: {digest}")
     extract_dir = TEXT_DIR / "G2PWModel_1.1"
     if extract_dir.exists():
         shutil.rmtree(extract_dir)
@@ -89,7 +80,6 @@ def ensure_g2pw() -> None:
 
 
 def download() -> None:
-    ensure_ffmpeg()
     ensure_g2pw()
     if ready():
         print("GPT-SoVITS pretrained assets already exist.")
@@ -112,7 +102,7 @@ def download() -> None:
         try:
             kwargs = {
                 "repo_id": repo_id,
-                "revision": "main",
+                "revision": PRETRAINED_REVISION,
                 "allow_patterns": ALLOW_PATTERNS,
                 "local_dir": str(TARGET_DIR),
             }

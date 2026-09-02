@@ -5,10 +5,14 @@ import re
 import jieba
 jieba.setLogLevel(logging.CRITICAL)
 
-# 更改fast_langdetect大模型位置
-from pathlib import Path
+# Use the compact model bundled with fast_langdetect; OwVoice only needs zh/en routing.
+from importlib.resources import files
 import fast_langdetect
-fast_langdetect.infer._default_detector = fast_langdetect.infer.LangDetector(fast_langdetect.infer.LangDetectConfig(cache_dir=Path(__file__).parent.parent.parent / "pretrained_models" / "fast_langdetect"))
+fast_langdetect.infer._default_detector = fast_langdetect.infer.LangDetector(
+    fast_langdetect.infer.LangDetectConfig(
+        custom_model_path=str(files("fast_langdetect.resources").joinpath("lid.176.ftz"))
+    )
+)
 
 
 from split_lang import LangSplitter

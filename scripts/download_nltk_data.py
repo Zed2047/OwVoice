@@ -20,11 +20,11 @@ PACKAGES = {
     # g2p_en 2.1.0 仍会检查旧包；新版 NLTK 的 pos_tag 则需要 _eng 包。
     "averaged_perceptron_tagger": {
         "url": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/taggers/averaged_perceptron_tagger.zip",
-        "sha256": "e1f13cf2532daaadf6bc3f481a49859f0b8ea6432ccdcd83e6a49a5f19008de9",
+        "sha256": "e1f13cf2532daadfd6f3bc481a49859f0b8ea6432ccdcd83e6a49a5f19008de9",
     },
     "averaged_perceptron_tagger_eng": {
         "url": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/taggers/averaged_perceptron_tagger_eng.zip",
-        "sha256": "6025f530624335c67d6547d44757b357b4e79ba030a0383e9887a92c1718f0b",
+        "sha256": "6025f530624335c67d6547d44757b357b4e79bae030a0383e9887a92c1718f0b",
     },
     "cmudict": {
         "url": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/corpora/cmudict.zip",

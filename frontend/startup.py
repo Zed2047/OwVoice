@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QTextEdit,
@@ -27,6 +28,16 @@ from PySide6.QtWidgets import (
 )
 
 from frontend.app import ICON_PATH, OwVoiceApp, set_windows_app_identity
+from frontend.gpu_runtime import (
+    GIB,
+    GPU_COMPONENTS,
+    active_gpu_component,
+    component_download_bytes,
+    detect_nvidia_gpu,
+    driver_is_supported,
+    install_gpu_component,
+    probe_gpu_component,
+)
 
 
 class StartupError(RuntimeError):
@@ -48,6 +59,15 @@ def resolve_project_path(project_dir: Path, value: str | None) -> Path | None:
     return path if path.is_absolute() else project_dir / path
 
 
+def resolve_runtime_paths(project_dir: Path) -> tuple[Path, Path]:
+    """Use the installed private runtime when present, otherwise the development venv."""
+    runtime_dir = project_dir / "runtime"
+    if runtime_dir.is_dir():
+        return runtime_dir / "python.exe", runtime_dir / "nltk_data"
+    venv_dir = project_dir / ".venv"
+    return venv_dir / "Scripts" / "python.exe", venv_dir / "nltk_data"
+
+
 def tail_file(path: Path, limit: int = 1800) -> str:
     if not path.exists():
         return ""
@@ -64,11 +84,66 @@ class StartupWorker(QObject):
     failed = Signal(str)
     finished = Signal()
 
-    def __init__(self, project_dir: Path) -> None:
+    def __init__(self, project_dir: Path, requested_gpu_component: str | None = None) -> None:
         super().__init__()
         self.project_dir = project_dir
+        self.python_exe, self.nltk_data_dir = resolve_runtime_paths(project_dir)
+        self.requested_gpu_component = requested_gpu_component
+        self.gpu_enabled = False
+        self.cancel_event = threading.Event()
         self.processes: list[subprocess.Popen] = []
         self.log_files: list[object] = []
+
+    def log_gpu_error(self, message: str) -> None:
+        try:
+            logs_dir = self.project_dir / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            with (logs_dir / "gpu-runtime.error.log").open("a", encoding="utf-8") as log:
+                log.write(message.rstrip() + "\n")
+        except OSError:
+            pass
+
+    def prepare_gpu_runtime(self) -> None:
+        if self.requested_gpu_component:
+            self.progress.emit(5)
+            self.status.emit("正在准备 NVIDIA GPU 加速组件……")
+            try:
+                gpu_name = install_gpu_component(
+                    self.project_dir,
+                    self.python_exe,
+                    self.requested_gpu_component,
+                    self.status.emit,
+                    self.cancel_event,
+                )
+            except Exception as exc:  # noqa: BLE001 - GPU is optional and must fall back
+                self.log_gpu_error(str(exc))
+                if not self.cancel_event.is_set():
+                    self.status.emit(f"GPU 组件未启用，将继续使用 CPU：{exc}")
+                return
+            self.gpu_enabled = True
+            self.progress.emit(9)
+            self.status.emit(f"NVIDIA GPU 加速已启用：{gpu_name}")
+            return
+
+        component = active_gpu_component(self.project_dir)
+        if not component:
+            self.status.emit("将使用 CPU 模式。")
+            return
+        self.status.emit("正在检查已安装的 NVIDIA GPU 组件……")
+        try:
+            gpu_name = probe_gpu_component(
+                self.python_exe,
+                self.project_dir / "runtime" / "gpu-site",
+                component,
+                self.cancel_event,
+            )
+        except Exception as exc:  # noqa: BLE001 - preserve CPU startup
+            self.log_gpu_error(str(exc))
+            self.status.emit("当前无法使用 NVIDIA GPU，将自动回退 CPU。")
+            return
+        self.gpu_enabled = True
+        self.progress.emit(9)
+        self.status.emit(f"NVIDIA GPU 加速已启用：{gpu_name}")
 
     def load_config(self) -> dict:
         config_path = self.project_dir / "config" / "voices.local.json"
@@ -90,6 +165,8 @@ class StartupWorker(QObject):
         cwd: Path,
         env: dict[str, str] | None = None,
     ) -> subprocess.Popen:
+        if self.cancel_event.is_set():
+            raise StartupError("启动已取消。")
         logs_dir = self.project_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         stdout = (logs_dir / f"{name}.log").open("ab")
@@ -100,9 +177,8 @@ class StartupWorker(QObject):
             # EXE 使用无控制台模式时，子进程仍可能单独弹出控制台窗口。
             creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
         environment = dict(env or os.environ)
-        nltk_data_dir = self.project_dir / ".venv" / "nltk_data"
-        if nltk_data_dir.is_dir():
-            environment["NLTK_DATA"] = str(nltk_data_dir)
+        if self.nltk_data_dir.is_dir():
+            environment["NLTK_DATA"] = str(self.nltk_data_dir)
         try:
             process = subprocess.Popen(
                 command,
@@ -117,6 +193,9 @@ class StartupWorker(QObject):
             stderr.close()
             raise
         self.processes.append(process)
+        if self.cancel_event.is_set():
+            self.stop_process(process)
+            raise StartupError("启动已取消。")
         return process
 
     def wait_for_port(
@@ -131,6 +210,8 @@ class StartupWorker(QObject):
         deadline = time.monotonic() + seconds
         started = time.monotonic()
         while time.monotonic() < deadline:
+            if self.cancel_event.is_set():
+                raise StartupError("启动已取消。")
             if port_open(port):
                 if progress_end is not None:
                     self.progress.emit(progress_end)
@@ -154,7 +235,7 @@ class StartupWorker(QObject):
             return
         self.progress.emit(10)
         self.status.emit("正在启动 GPT-SoVITS 引擎……")
-        python_exe = self.project_dir / ".venv" / "Scripts" / "python.exe"
+        python_exe = self.python_exe
         gsv_root = Path(os.environ.get("OWVOICE_GSV_ROOT", self.project_dir / "GPT-SoVITS"))
         api_py = gsv_root / "api.py"
         gpt_path = resolve_project_path(self.project_dir, voice.get("gpt_model"))
@@ -164,7 +245,7 @@ class StartupWorker(QObject):
         if any(path is None or not path.is_file() for path in required):
             missing = next(str(path) for path in required if path is None or not path.is_file())
             raise StartupError(f"启动 GPT-SoVITS 所需文件不存在：{missing}")
-        nltk_data_dir = self.project_dir / ".venv" / "nltk_data"
+        nltk_data_dir = self.nltk_data_dir
         required_nltk = (
             nltk_data_dir / "taggers" / "averaged_perceptron_tagger_eng",
             nltk_data_dir / "corpora" / "cmudict",
@@ -172,19 +253,49 @@ class StartupWorker(QObject):
         missing_nltk = next((str(path) for path in required_nltk if not path.is_dir()), None)
         if missing_nltk:
             raise StartupError(
-                "缺少 GPT-SoVITS 英文处理资源，请重新运行首次配置.bat。"
+                "缺少 GPT-SoVITS 英文处理资源，请重新安装或修复 OwVoice。"
                 f"\n\n缺少：{missing_nltk}"
             )
         cut_punc = voice.get("inference", {}).get("cut_punc", "，。？！；：,.?!…")
-        command = [
+        base_command = [
             str(python_exe), str(api_py), "-a", "127.0.0.1", "-p", "9880",
             "-s", str(sovits_path), "-g", str(gpt_path), "-dr", str(ref_wav),
             "-dt", str(voice.get("prompt_text", "")), "-dl",
             str(voice.get("prompt_language", "zh")), "-cp", str(cut_punc),
         ]
-        process = self.start_process("gpt_sovits", command, gsv_root)
-        self.wait_for_port(9880, 180, "GPT-SoVITS", process, progress_start=10, progress_end=70)
-        self.status.emit("GPT-SoVITS 引擎已就绪。")
+        attempts = (True, False) if self.gpu_enabled else (False,)
+        for use_gpu in attempts:
+            command = list(base_command)
+            environment = os.environ.copy()
+            if use_gpu:
+                environment.pop("OWVOICE_DISABLE_GPU", None)
+                self.status.emit("正在使用 NVIDIA GPU 启动 GPT-SoVITS……")
+            else:
+                environment["OWVOICE_DISABLE_GPU"] = "1"
+                command.extend(("-d", "cpu", "-fp"))
+                self.status.emit("正在使用 CPU 启动 GPT-SoVITS……")
+            process = self.start_process("gpt_sovits", command, gsv_root, environment)
+            try:
+                self.wait_for_port(
+                    9880,
+                    600,
+                    "GPT-SoVITS",
+                    process,
+                    progress_start=10,
+                    progress_end=70,
+                )
+            except StartupError as exc:
+                if self.cancel_event.is_set():
+                    raise
+                if not use_gpu:
+                    raise
+                self.stop_process(process)
+                self.gpu_enabled = False
+                self.log_gpu_error(str(exc))
+                self.status.emit("GPU 引擎启动失败，正在自动回退 CPU……")
+                continue
+            self.status.emit("GPT-SoVITS 引擎已就绪。")
+            return
 
     def start_backend(self, voice: dict) -> None:
         if port_open(8765):
@@ -193,20 +304,24 @@ class StartupWorker(QObject):
             return
         self.progress.emit(72)
         self.status.emit("正在启动 OwVoice 后端……")
-        python_exe = self.project_dir / ".venv" / "Scripts" / "python.exe"
+        python_exe = self.python_exe
         if not python_exe.is_file():
-            raise StartupError("找不到 .venv\\Scripts\\python.exe，请先完成首次配置。")
+            raise StartupError(f"找不到 OwVoice Python 运行时：{python_exe}")
         command = [
             str(python_exe), "-m", "uvicorn", "backend.server:app",
             "--host", "127.0.0.1", "--port", "8765",
         ]
         environment = os.environ.copy()
         environment["OWVOICE_INITIAL_VOICE_ID"] = str(voice.get("id", ""))
+        if not self.gpu_enabled:
+            environment["OWVOICE_DISABLE_GPU"] = "1"
         process = self.start_process("backend", command, self.project_dir, environment)
         self.wait_for_port(8765, 30, "OwVoice 后端", process, progress_start=72, progress_end=88)
         deadline = time.monotonic() + 20
         started = time.monotonic()
         while time.monotonic() < deadline:
+            if self.cancel_event.is_set():
+                raise StartupError("启动已取消。")
             try:
                 if requests.get("http://127.0.0.1:8765/api/health", timeout=2).status_code == 200:
                     self.progress.emit(95)
@@ -263,6 +378,10 @@ class StartupWorker(QObject):
             self.status.emit("正在检查 OwVoice 配置……")
             data = self.load_config()
             self.progress.emit(5)
+            if not port_open(9880):
+                self.prepare_gpu_runtime()
+            if self.cancel_event.is_set():
+                return
             self.start_gpt_sovits(data["voice"])
             # GPT-SoVITS 已在启动参数中加载首个角色；后端通过环境变量同步状态，避免二次加载。
             self.start_backend(data["voice"])
@@ -282,19 +401,24 @@ class StartupWorker(QObject):
         finally:
             self.finished.emit()
 
+    def stop_process(self, process: subprocess.Popen) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                check=False,
+            )
+        except OSError:
+            process.kill()
+
     def stop_services(self) -> None:
+        self.cancel_event.set()
         for process in reversed(self.processes):
-            if process.poll() is None:
-                try:
-                    subprocess.run(
-                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                        check=False,
-                    )
-                except OSError:
-                    process.kill()
+            self.stop_process(process)
         self.processes.clear()
         for handle in self.log_files:
             try:
@@ -379,15 +503,16 @@ class StartupController(QObject):
     ready = Signal()
     failed = Signal(str)
 
-    def __init__(self, project_dir: Path) -> None:
+    def __init__(self, project_dir: Path, requested_gpu_component: str | None = None) -> None:
         super().__init__()
         self.project_dir = project_dir
+        self.requested_gpu_component = requested_gpu_component
         self.thread: QThread | None = None
         self.worker: StartupWorker | None = None
 
     def start(self) -> None:
         self.thread = QThread()
-        self.worker = StartupWorker(self.project_dir)
+        self.worker = StartupWorker(self.project_dir, self.requested_gpu_component)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.status.connect(self.status)
@@ -401,6 +526,9 @@ class StartupController(QObject):
     def stop_services(self) -> None:
         if self.worker is not None:
             self.worker.stop_services()
+        if self.thread is not None and self.thread.isRunning():
+            self.thread.quit()
+            self.thread.wait()
 
 
 def main() -> int:
@@ -412,13 +540,48 @@ def main() -> int:
     project_dir = Path(
         os.environ.get("OWVOICE_PROJECT_DIR", Path(__file__).resolve().parents[1])
     )
-    controller = StartupController(project_dir)
+    requested_gpu_component = None
+    window.show()
+    app.processEvents()
+    if (
+        (project_dir / "runtime" / "python.exe").is_file()
+        and not port_open(9880)
+        and active_gpu_component(project_dir) is None
+    ):
+        gpu = detect_nvidia_gpu()
+        if gpu is not None:
+            spec = GPU_COMPONENTS[gpu.component]
+            if not driver_is_supported(gpu):
+                QMessageBox.information(
+                    window,
+                    "需要更新 NVIDIA 驱动",
+                    f"检测到 {gpu.name}，当前驱动为 {gpu.driver}。\n"
+                    f"GPU 加速至少需要驱动 {spec['minimum_driver']}，本次将使用 CPU。",
+                )
+            else:
+                download_gib = component_download_bytes(gpu.component) / GIB
+                required_gib = spec["required_free_bytes"] / GIB
+                message = QMessageBox(window)
+                message.setWindowTitle("检测到 NVIDIA 显卡")
+                message.setIcon(QMessageBox.Icon.Question)
+                message.setText(f"检测到 {gpu.name}（驱动 {gpu.driver}），是否安装 GPU 加速组件？")
+                message.setInformativeText(
+                    f"将从 PyTorch 官方下载约 {download_gib:.1f} GB，安装时需至少 {required_gib:.0f} GB 可用空间。"
+                    "\n选择 CPU 不会下载任何内容，下次启动仍可选择。"
+                )
+                install_button = message.addButton("安装 GPU 加速", QMessageBox.ButtonRole.AcceptRole)
+                cpu_button = message.addButton("本次使用 CPU", QMessageBox.ButtonRole.RejectRole)
+                message.setDefaultButton(cpu_button)
+                message.exec()
+                if message.clickedButton() is install_button:
+                    requested_gpu_component = gpu.component
+
+    controller = StartupController(project_dir, requested_gpu_component)
     controller.status.connect(window.set_startup_status)
     controller.progress.connect(window.set_startup_progress)
     controller.failed.connect(window.show_startup_error)
     controller.ready.connect(window.finish_startup)
     app.aboutToQuit.connect(controller.stop_services)
-    window.show()
     controller.start()
     return app.exec()
 

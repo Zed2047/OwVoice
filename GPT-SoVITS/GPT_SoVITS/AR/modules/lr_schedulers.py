@@ -3,7 +3,6 @@
 import math
 
 import torch
-from matplotlib import pyplot as plt
 from torch import nn
 from torch.optim import Adam
 
@@ -63,6 +62,8 @@ class WarmupCosineLRSchedule(torch.optim.lr_scheduler._LRScheduler):
 
 
 if __name__ == "__main__":
+    from matplotlib import pyplot as plt
+
     m = nn.Linear(10, 10)
     opt = Adam(m.parameters(), lr=1e-4)
     s = WarmupCosineLRSchedule(

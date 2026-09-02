@@ -6,28 +6,22 @@ OwVoice 是一个守望先锋角色本地语音合成工具，内置安娜、禅
 
 ### 1. 下载
 
-请从 GitHub 的 **Releases** 下载 `OwVoice-v*.zip`，不要下载页面上的 `Source code` 压缩包。
-
-将 ZIP 解压到一个有足够空间、并且有读写权限的目录，例如 `D:\OwVoice`。不建议解压到 `C:\Program Files` 等受保护目录。
+请从 GitHub 的 **Releases** 下载 `OwVoice-Setup-v*.exe`，不要下载页面上的 `Source code` 压缩包。
 
 ### 2. 使用前准备
 
 - Windows 10/11 64 位
-- Python 3.10 64 位，建议从 [python.org](https://www.python.org/downloads/windows/) 安装
-- NVIDIA 显卡及可用的 NVIDIA 驱动
-- 首次配置需要联网
-- 建议预留至少 5GB 可用空间
+- 所有电脑都可以使用 CPU 推理，不需要 NVIDIA 显卡或 CUDA
+- 检测到 NVIDIA 显卡时，可选择安装 GPU 加速，也可以选择继续使用 CPU
+- 安装器会显示所需磁盘空间
 
-本项目使用项目目录内的 `.venv` 虚拟环境运行，不需要 Anaconda。首次配置会安装 Python 依赖、下载 GPT-SoVITS 推理模型并准备 NLTK 资源。
+安装器已包含可直接启动的 CPU 运行时、推理依赖和模型。普通用户不需要安装 Python或运行脚本；只有主动选择 GPU 加速时才会联网下载 NVIDIA 运行组件。
 
-### 3. 首次配置
+### 3. 安装和启动
 
-1. 双击 `setup.bat`。
-2. 等待窗口显示 `Setup complete`。
-3. 配置完成后关闭窗口。
-
-首次配置因为要配置环境、下载模型，可能需要较长时间，请不要中途关闭窗口。
-之后使用时直接双击 `OwVoice.exe`，不需要再次运行配置脚本。
+1. 双击 `OwVoice-Setup-v*.exe`。
+2. 按向导完成安装。
+3. 从开始菜单打开 OwVoice；也可以在安装时选择创建桌面快捷方式。
 
 ### 4. 生成语音
 
@@ -38,21 +32,21 @@ OwVoice 是一个守望先锋角色本地语音合成工具，内置安娜、禅
 5. 点击“合成语音”。
 6. 合成完成后可以播放、打开文件或删除 WAV 文件。
 
-> 提示：首次启动通常需要约 15 秒加载语音引擎，请耐心等待。
+> 提示：CPU 首次加载语音引擎可能需要几分钟，请耐心等待。GPU 组件只需确认一次，下载或启用失败时会自动回退 CPU。
 
 ## 常见问题
 
-### 找不到 Python
+### 推理速度较慢
 
-请安装 64 位 Python 3.10，并重新打开 `setup.bat`。如果电脑中安装了多个 Python，请确认 `py -3.10` 可以正常运行。
+未安装 GPU 组件时使用 CPU 推理，首次加载和长文本合成需要更多时间。详细错误可查看安装目录中的 `logs` 目录。
 
-### PyTorch、CUDA 或显卡错误
+### 检测到 NVIDIA 显卡后可以不安装吗
 
-请确认 NVIDIA 驱动正常，并使用支持 CUDA 的 NVIDIA 显卡。详细错误可查看 `logs` 目录中的日志文件。
+可以。选择“本次使用 CPU”不会下载任何文件，下次启动仍可重新选择。GPU 组件约需下载 2.6–3.2 GB，并需要 7–9 GB 临时可用空间。
 
 ### 合成失败
 
-请先确认首次配置已经完成，然后查看：
+请查看：
 
 - `logs\gpt_sovits.error.log`
 - `logs\backend.error.log`
@@ -64,24 +58,25 @@ OwVoice 是一个守望先锋角色本地语音合成工具，内置安娜、禅
 
 ## 发布包内容
 
-发布 ZIP 中包含：
+安装包中包含：
 
-- `OwVoice.exe` 和运行文件
-- `setup.bat` 首次配置脚本
+- 私有 Python 3.10 运行时和 PySide6 界面
+- 可选、自动校验且可安全回退的 NVIDIA GPU 组件安装流程
+- OwVoice 后端与 GPT-SoVITS 推理依赖
 - 三个角色模型和参考音频
 - GPT-SoVITS 推理代码
 - 配置模板和许可证说明
 
-普通用户不需要修改配置文件，也不需要直接运行 Python 文件。
+普通用户不需要修改配置文件，也不需要直接运行 Python 文件或脚本。
 
 ## 开发者构建
 
 ```powershell
-.\scripts\build_exe.ps1
-.\scripts\build_release.ps1
+.\scripts\setup.ps1
+.\scripts\build_installer.ps1 -Version v0.1.1
 ```
 
-先构建 EXE，再生成 `dist\OwVoice-v*.zip`。开发诊断功能默认关闭，不进入用户界面。
+构建机需要 Python 3.10 x64、Inno Setup，以及未提交到 Git 的三套角色模型。脚本生成 `dist\installer\OwVoice-Setup-v*-Universal.exe` 和 SHA256 manifest。开发诊断功能默认关闭，不进入用户界面。
 
 ## 版权与使用说明
 

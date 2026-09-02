@@ -20,7 +20,7 @@ from .utils import load_config
 
 onnxruntime.set_default_logger_severity(3)
 try:
-    onnxruntime.preload_dlls()
+    onnxruntime.preload_dlls(cuda=False, cudnn=False)
 except Exception:
     pass
 warnings.filterwarnings("ignore")

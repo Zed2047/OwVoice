@@ -1,6 +1,7 @@
 # Python 环境与缓存
 .venv/
 venv/
+.build/
 __pycache__/
 *.py[cod]
 .pytest_cache/
