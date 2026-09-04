@@ -51,7 +51,6 @@ logs/
 # 本地 AI 协作资料与测试素材
 docs/
 AGENTS.md
-MODEL_PACKAGE_SPEC.md
 普通用户测试/
 UserTest-Current/
 旧版模型/

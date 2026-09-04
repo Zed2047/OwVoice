@@ -1,3 +1,0 @@
-# 默认安装 CPU 依赖，普通用户也可以直接执行 pip install -r requirements.txt。
-# GPU 用户请改用 requirements-gpu.txt。
--r requirements-cpu.txt

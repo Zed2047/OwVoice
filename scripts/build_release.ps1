@@ -38,17 +38,18 @@ function Copy-EngineTree([string]$sourceDirectory, [string]$targetDirectory) {
     }
 }
 
-foreach ($file in @("README.md", "AI_SETUP.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "requirements.txt", "requirements-common.txt", "requirements-cpu.txt", "requirements-gpu.txt", "requirements-training.txt", "ENVIRONMENT_AND_TRAINING.md")) {
+foreach ($file in @("README.md", "MODEL_PACKAGE_SPEC.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "requirements-cpu.txt", "requirements-gpu.txt", "requirements-training.txt")) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $file) -Destination $releasePackagePath
 }
 # 发布 ZIP 使用 ASCII 文件名，避免 Windows 压缩工具处理中文文件名时产生乱码。
 [System.IO.File]::Copy((Join-Path (Get-Location) "setup.bat"), (Join-Path $releasePackagePath "setup.bat"), $true)
-foreach ($directory in @("backend", "frontend", "config")) {
+foreach ($directory in @("backend", "frontend")) {
     $sourceDirectory = Join-Path $projectRoot $directory
     $targetDirectory = Join-Path $releasePackagePath $directory
     New-Item -ItemType Directory -Force -Path $targetDirectory | Out-Null
     Get-ChildItem -LiteralPath $sourceDirectory -Force | Copy-Item -Destination $targetDirectory -Recurse
 }
+New-Item -ItemType Directory -Force -Path (Join-Path $releasePackagePath "config") | Out-Null
 # 公开包不携带角色头像等本地素材；用户模型和头像由本地模型库自行管理。
 $releasePackagePath = Join-Path -Path $releaseStagingPath -ChildPath $releaseName
 $assetsTargetPath = Join-Path -Path $releasePackagePath -ChildPath "assets"
