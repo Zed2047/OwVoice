@@ -17,7 +17,13 @@ if getattr(sys, "frozen", False):
         (
             candidate
             for candidate in project_candidates
-            if (candidate / "config").is_dir() and (candidate / "models").is_dir()
+            if (
+                (candidate / "config").is_dir()
+                and (
+                    (candidate / "data" / "models").is_dir()
+                    or ((candidate / "assets").is_dir() and (candidate / "GPT-SoVITS").is_dir())
+                )
+            )
         ),
         executable_dir,
     )

@@ -1,4 +1,4 @@
-"""OwVoice 单窗口启动流程：先显示加载页，再切换到正式工具界面。"""
+﻿"""OwVoice 单窗口启动流程：先显示加载页，再切换到正式工具界面。"""
 
 from __future__ import annotations
 
@@ -9,10 +9,12 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
+import uuid
 from pathlib import Path
 
 import requests
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal, qInstallMessageHandler
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -31,6 +33,37 @@ from frontend.app import ICON_PATH, OwVoiceApp, set_windows_app_identity
 
 class StartupError(RuntimeError):
     """启动阶段的可读错误。"""
+
+
+def install_frontend_exception_hook(project_dir: Path) -> None:
+    """为无控制台的 EXE 保存未处理异常，便于定位闪退原因。"""
+    log_path = project_dir / "logs" / "frontend.error.log"
+
+    def handle(exc_type, exc_value, exc_traceback) -> None:
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            detail = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+            with log_path.open("a", encoding="utf-8", errors="replace") as handle_file:
+                handle_file.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] 未处理的前端异常\n{detail}")
+        except OSError:
+            pass
+
+    sys.excepthook = handle
+
+
+def install_qt_message_handler(project_dir: Path) -> None:
+    """记录 Qt 原生警告，便于定位窗口或线程导致的 EXE 原生退出。"""
+    log_path = project_dir / "logs" / "frontend.qt.log"
+
+    def handle(mode, _context, message) -> None:
+        try:
+            mode_name = getattr(mode, "name", str(mode))
+            with log_path.open("a", encoding="utf-8", errors="replace") as log_file:
+                log_file.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {mode_name}: {message}\n")
+        except OSError:
+            pass
+
+    qInstallMessageHandler(handle)
 
 
 def port_open(port: int) -> bool:
@@ -68,17 +101,36 @@ class StartupWorker(QObject):
         super().__init__()
         self.project_dir = project_dir
         self.processes: list[subprocess.Popen] = []
+        self.service_processes: dict[str, subprocess.Popen] = {}
         self.log_files: list[object] = []
+    def resolve_python_exe(self) -> Path:
+        """OwVoice 使用项目目录下由用户安装的 Python 虚拟环境。"""
+
+        candidate = self.project_dir / ".venv" / "Scripts" / "python.exe"
+        if candidate.is_file():
+            return candidate
+        raise StartupError(
+            "找不到 OwVoice 运行环境。请先运行 scripts\\setup.ps1。"
+        )
+
+    def resolve_nltk_data_dir(self) -> Path | None:
+        """查找项目数据目录或虚拟环境中的 NLTK 资源。"""
+
+        candidates = (
+            self.project_dir / "data" / "nltk_data",
+            self.project_dir / ".venv" / "nltk_data",
+        )
+        return next((candidate for candidate in candidates if candidate.is_dir()), None)
 
     def load_config(self) -> dict:
         config_path = self.project_dir / "config" / "voices.local.json"
         if not config_path.is_file():
             raise StartupError("找不到 config\\voices.local.json，请先完成首次配置。")
         try:
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            from backend.server import load_voices
+            voices = load_voices()
+        except (OSError, RuntimeError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
             raise StartupError(f"读取人物配置失败：{exc}") from exc
-        voices = [voice for voice in config.get("voices", []) if voice.get("enabled", True)]
         if not voices:
             raise StartupError("人物配置中没有启用的角色。")
         return {"voice": voices[0]}
@@ -100,8 +152,8 @@ class StartupWorker(QObject):
             # EXE 使用无控制台模式时，子进程仍可能单独弹出控制台窗口。
             creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
         environment = dict(env or os.environ)
-        nltk_data_dir = self.project_dir / ".venv" / "nltk_data"
-        if nltk_data_dir.is_dir():
+        nltk_data_dir = self.resolve_nltk_data_dir()
+        if nltk_data_dir is not None:
             environment["NLTK_DATA"] = str(nltk_data_dir)
         try:
             process = subprocess.Popen(
@@ -117,7 +169,28 @@ class StartupWorker(QObject):
             stderr.close()
             raise
         self.processes.append(process)
+        self.service_processes[name] = process
         return process
+
+    def stop_service(self, name: str) -> None:
+        """停止由本次启动流程创建的单个服务，不影响 OwVoice 后端。"""
+
+        process = self.service_processes.pop(name, None)
+        if process is None or process.poll() is not None:
+            return
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                check=False,
+            )
+        except OSError:
+            try:
+                process.kill()
+            except OSError:
+                pass
 
     def wait_for_port(
         self,
@@ -154,7 +227,7 @@ class StartupWorker(QObject):
             return
         self.progress.emit(10)
         self.status.emit("正在启动 GPT-SoVITS 引擎……")
-        python_exe = self.project_dir / ".venv" / "Scripts" / "python.exe"
+        python_exe = self.resolve_python_exe()
         gsv_root = Path(os.environ.get("OWVOICE_GSV_ROOT", self.project_dir / "GPT-SoVITS"))
         api_py = gsv_root / "api.py"
         gpt_path = resolve_project_path(self.project_dir, voice.get("gpt_model"))
@@ -164,7 +237,9 @@ class StartupWorker(QObject):
         if any(path is None or not path.is_file() for path in required):
             missing = next(str(path) for path in required if path is None or not path.is_file())
             raise StartupError(f"启动 GPT-SoVITS 所需文件不存在：{missing}")
-        nltk_data_dir = self.project_dir / ".venv" / "nltk_data"
+        nltk_data_dir = self.resolve_nltk_data_dir()
+        if nltk_data_dir is None:
+            raise StartupError("找不到 NLTK 语音处理资源，请先完成首次配置。")
         required_nltk = (
             nltk_data_dir / "taggers" / "averaged_perceptron_tagger_eng",
             nltk_data_dir / "corpora" / "cmudict",
@@ -193,9 +268,7 @@ class StartupWorker(QObject):
             return
         self.progress.emit(72)
         self.status.emit("正在启动 OwVoice 后端……")
-        python_exe = self.project_dir / ".venv" / "Scripts" / "python.exe"
-        if not python_exe.is_file():
-            raise StartupError("找不到 .venv\\Scripts\\python.exe，请先完成首次配置。")
+        python_exe = self.resolve_python_exe()
         command = [
             str(python_exe), "-m", "uvicorn", "backend.server:app",
             "--host", "127.0.0.1", "--port", "8765",
@@ -243,19 +316,28 @@ class StartupWorker(QObject):
             "cut_punc": str(inference.get("cut_punc", "，。？！；：,.?!…")),
         }
         started = time.monotonic()
-        try:
-            response = requests.post("http://127.0.0.1:9880/", json=params, timeout=180)
-            if response.status_code != 200:
-                raise RuntimeError(f"HTTP {response.status_code}: {response.text[:300]}")
-            self.status.emit(f"语音引擎预热完成（{time.monotonic() - started:.1f} 秒）。")
-        except Exception as exc:
-            log_path = self.project_dir / "logs" / "warmup.error.log"
+        last_error: Exception | None = None
+        # GPT-SoVITS 端口打开后，默认 speaker 注册可能还差一个很短的时间。
+        # 预热失败不能影响主界面启动，有限重试可以避免把瞬时竞态记录成错误。
+        for attempt in range(3):
             try:
-                with log_path.open("a", encoding="utf-8") as log:
-                    log.write(f"后台预热失败：{exc}\n")
-            except OSError:
-                pass
-            self.status.emit("语音引擎后台预热未完成，首次生成时会继续初始化。")
+                response = requests.post("http://127.0.0.1:9880/", json=params, timeout=180)
+                if response.status_code != 200:
+                    raise RuntimeError(f"HTTP {response.status_code}: {response.text[:300]}")
+                self.status.emit(f"语音引擎预热完成（{time.monotonic() - started:.1f} 秒）。")
+                return
+            except Exception as exc:  # noqa: BLE001 - 预热失败不应阻塞主界面
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(4)
+        exc = last_error or RuntimeError("未知预热错误")
+        try:
+            log_path = self.project_dir / "logs" / "warmup.error.log"
+            with log_path.open("a", encoding="utf-8") as log:
+                log.write(f"后台预热失败：{exc}\n")
+        except OSError:
+            pass
+        self.status.emit("语音引擎后台预热未完成，首次生成时会继续初始化。")
 
     def run(self) -> None:
         try:
@@ -382,21 +464,23 @@ class StartupController(QObject):
     def __init__(self, project_dir: Path) -> None:
         super().__init__()
         self.project_dir = project_dir
-        self.thread: QThread | None = None
+        self.startup_thread: QThread | None = None
         self.worker: StartupWorker | None = None
 
     def start(self) -> None:
-        self.thread = QThread()
+        self.startup_thread = QThread()
         self.worker = StartupWorker(self.project_dir)
-        self.worker.moveToThread(self.thread)
-        self.thread.started.connect(self.worker.run)
+        self.worker.moveToThread(self.startup_thread)
+        self.startup_thread.started.connect(self.worker.run)
         self.worker.status.connect(self.status)
         self.worker.progress.connect(self.progress)
         self.worker.ready.connect(self.ready)
         self.worker.failed.connect(self.failed)
-        self.worker.finished.connect(self.thread.quit)
-        self.thread.finished.connect(self.thread.deleteLater)
-        self.thread.start()
+        self.worker.finished.connect(self.startup_thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        # StartupController 持有线程到应用退出，再由统一关闭流程回收，
+        # 避免启动完成后仍有引用访问已删除的 QThread。
+        self.startup_thread.start()
 
     def stop_services(self) -> None:
         if self.worker is not None:
@@ -405,14 +489,19 @@ class StartupController(QObject):
 
 def main() -> int:
     set_windows_app_identity()
-    app = QApplication(sys.argv)
-    if ICON_PATH.is_file():
-        app.setWindowIcon(QIcon(str(ICON_PATH)))
-    window = OwVoiceApp(startup_mode=True)
     project_dir = Path(
         os.environ.get("OWVOICE_PROJECT_DIR", Path(__file__).resolve().parents[1])
     )
+    # 每次启动生成新的本地前端会话，训练看门狗据此判断前端是否仍存活。
+    os.environ["OWVOICE_SESSION_ID"] = uuid.uuid4().hex
+    install_frontend_exception_hook(project_dir)
+    app = QApplication(sys.argv)
+    install_qt_message_handler(project_dir)
+    if ICON_PATH.is_file():
+        app.setWindowIcon(QIcon(str(ICON_PATH)))
+    window = OwVoiceApp(startup_mode=True)
     controller = StartupController(project_dir)
+    window.startup_controller = controller
     controller.status.connect(window.set_startup_status)
     controller.progress.connect(window.set_startup_progress)
     controller.failed.connect(window.show_startup_error)
@@ -425,3 +514,128 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# 公开版兼容层：没有内置角色模型时允许进入空工作台。
+_ow_original_start_gpt_sovits = StartupWorker.start_gpt_sovits
+_ow_original_start_backend = StartupWorker.start_backend
+_ow_original_warmup = StartupWorker.warmup_gpt_sovits
+
+
+def _ow_load_config(self) -> dict:
+    config_path = self.project_dir / "config" / "voices.local.json"
+    if not config_path.is_file():
+        return {"voice": None}
+    try:
+        from backend.server import load_voices
+        voices = load_voices()
+    except (OSError, RuntimeError, json.JSONDecodeError) as exc:
+        raise StartupError(f"读取人物配置失败：{exc}") from exc
+    return {"voice": voices[0] if voices else None}
+
+
+def _ow_start_gpt_sovits(self, voice: dict | None) -> None:
+    if voice is None:
+        self.progress.emit(70)
+        self.status.emit("暂无本地模型，已跳过 GPT-SoVITS 启动。")
+        return
+    _ow_original_start_gpt_sovits(self, voice)
+
+
+def _ow_start_backend(self, voice: dict | None) -> None:
+    if voice is None:
+        if port_open(8765):
+            self.progress.emit(95)
+            self.status.emit("OwVoice 后端已在运行，正在复用……")
+            return
+        self.progress.emit(72)
+        self.status.emit("正在启动 OwVoice 本地后端……")
+        python_exe = self.resolve_python_exe()
+        command = [
+            str(python_exe), "-m", "uvicorn", "backend.server:app",
+            "--host", "127.0.0.1", "--port", "8765",
+        ]
+        environment = os.environ.copy()
+        environment["OWVOICE_INITIAL_VOICE_ID"] = ""
+        process = self.start_process("backend", command, self.project_dir, environment)
+        self.wait_for_port(8765, 60, "OwVoice 后端", process, progress_start=72, progress_end=95)
+        time.sleep(1.0)
+        self.status.emit("OwVoice 本地后端已就绪。")
+        return
+    _ow_original_start_backend(self, voice)
+
+
+def _ow_wait_model_catalog(self) -> None:
+    """确认后端已经能够读取模型清单，再允许进入首页。"""
+
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        try:
+            response = requests.get("http://127.0.0.1:8765/api/models", timeout=3)
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, list):
+                self.progress.emit(98)
+                self.status.emit(f"模型清单已就绪，共 {len(payload)} 个模型。")
+                return
+        except (OSError, ValueError, requests.RequestException):
+            pass
+        time.sleep(0.5)
+    raise StartupError("模型清单加载超时，请检查 data\\models 和后端日志。")
+
+
+def _ow_warmup(self, voice: dict | None) -> None:
+    if voice is not None:
+        _ow_original_warmup(self, voice)
+
+
+
+def _ow_load_config_safe(self) -> dict:
+    config_path = self.project_dir / "config" / "voices.local.json"
+    if not config_path.is_file():
+        return {"voice": None}
+    try:
+        from backend.server import load_voices, resolve_path
+        voices = load_voices()
+    except (OSError, RuntimeError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise StartupError(f"读取人物配置失败：{exc}") from exc
+    for voice in voices:
+        required = (resolve_path(voice.get("gpt_model")), resolve_path(voice.get("sovits_model")), resolve_path(voice.get("reference_audio")))
+        if all(path is not None and path.is_file() for path in required):
+            return {"voice": voice}
+    return {"voice": None}
+
+def _ow_run_safe(self) -> None:
+    try:
+        self.progress.emit(2)
+        self.status.emit("正在检查 OwVoice 配置……")
+        data = self.load_config()
+        voice = data.get("voice")
+        if voice is None:
+            # 即使没有语音模型，也要启动轻量 OwVoice 后端。
+            # 本地模型库和更新按钮通过后端接口工作；GPT-SoVITS 引擎仍保持关闭。
+            self.start_backend(None)
+            self.wait_model_catalog()
+            self.progress.emit(100)
+            self.status.emit("未发现本地模型，已进入空工作台；可从本地模型库导入或开始训练。")
+            self.ready.emit()
+            return
+        self.progress.emit(5)
+        self.start_gpt_sovits(voice)
+        self.start_backend(voice)
+        self.wait_model_catalog()
+        self.progress.emit(98)
+        self.status.emit("模型加载完成，正在后台预热并打开 OwVoice……")
+        threading.Thread(target=self.warmup_gpt_sovits, args=(voice,), name="owvoice-warmup", daemon=True).start()
+        self.progress.emit(100)
+        self.ready.emit()
+    except Exception as exc:
+        self.stop_services()
+        self.failed.emit(str(exc))
+    finally:
+        self.finished.emit()
+
+StartupWorker.load_config = _ow_load_config_safe
+StartupWorker.start_gpt_sovits = _ow_start_gpt_sovits
+StartupWorker.start_backend = _ow_start_backend
+StartupWorker.wait_model_catalog = _ow_wait_model_catalog
+StartupWorker.warmup_gpt_sovits = _ow_warmup
+StartupWorker.run = _ow_run_safe

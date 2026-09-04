@@ -1,3 +1,7 @@
 G2PWModel
 __pycache__
 *.zip
+/cmudict_cache.pickle
+/engdict_cache.pickle
+/namedict_cache.pickle
+/ja_userdic/user.dict

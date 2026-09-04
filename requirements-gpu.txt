@@ -1,0 +1,7 @@
+# GPU 模式：需要 NVIDIA 显卡和兼容的 CUDA 驱动/运行组件，推理速度更高。
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+torch==2.7.0+cu128
+torchaudio==2.7.0+cu128
+onnxruntime-gpu==1.23.2
+-r requirements-common.txt

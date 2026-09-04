@@ -1,0 +1,7 @@
+# 可选：只有需要本地训练时才安装。
+# 这些版本与 requirements-common.txt 保持一致；不再直接引用上游未锁定依赖。
+tensorboard==2.21.0
+gradio==4.44.1
+funasr==1.0.27
+modelscope==1.39.1
+av==17.1.0

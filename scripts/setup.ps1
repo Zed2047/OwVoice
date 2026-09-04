@@ -1,3 +1,8 @@
+﻿param(
+    [ValidateSet("CPU", "GPU")]
+    [string]$Mode = ""
+)
+
 $ErrorActionPreference = "Stop"
 
 $projectDir = Split-Path -Parent $PSScriptRoot
@@ -15,88 +20,120 @@ function Get-BasePython {
             $script:basePythonArgs = @()
             return [System.IO.Path]::GetFullPath($env:OWVOICE_PYTHON)
         }
-        throw "OWVOICE_PYTHON does not point to a Python executable."
+        throw "OWVOICE_PYTHON 指向的文件不存在。"
     }
+
     $py = Get-Command py.exe -ErrorAction SilentlyContinue
     if ($null -ne $py) {
-        foreach ($version in @("-3.10", "-3.9")) {
-            & $py.Source $version -c "import sys; raise SystemExit(0 if sys.version_info[:2] in ((3,10),(3,9)) else 1)" 2>$null
-            if ($LASTEXITCODE -eq 0) {
-                $script:basePythonArgs = @($version)
-                return $py.Source
-            }
+        & $py.Source -3.10 -c "import struct, sys; raise SystemExit(0 if sys.version_info[:2] == (3,10) and struct.calcsize('P') * 8 == 64 else 1)" 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $script:basePythonArgs = @("-3.10")
+            return $py.Source
         }
     }
+
     $python = Get-Command python.exe -ErrorAction SilentlyContinue
     if ($null -ne $python) {
-        & $python.Source -c "import sys; raise SystemExit(0 if sys.version_info[:2] in ((3,10),(3,9)) else 1)" 2>$null
+        & $python.Source -c "import struct, sys; raise SystemExit(0 if sys.version_info[:2] == (3,10) and struct.calcsize('P') * 8 == 64 else 1)" 2>$null
         if ($LASTEXITCODE -eq 0) {
             $script:basePythonArgs = @()
             return $python.Source
         }
     }
-    throw "Python 3.9 or 3.10 is required. Install it from python.org, then run this file again."
+
+    throw "需要 64 位 Python 3.10。请先安装 Python 3.10 x64，再重新运行 setup.ps1。"
 }
 
-function Get-PythonVersion([string]$path) {
-    return (& $path -c "import sys; print('%d.%d' % sys.version_info[:2])").Trim()
+function Get-PythonInfo([string]$path) {
+    return (& $path -c "import platform, struct, sys; print('%d.%d|%d|%s' % (sys.version_info[0], sys.version_info[1], struct.calcsize('P') * 8, platform.python_implementation()))").Trim()
 }
 
-Write-Host "OwVoice first-time setup" -ForegroundColor Green
-Write-Host ("Project: " + $projectDir)
+function Select-InstallMode {
+    if (-not [string]::IsNullOrWhiteSpace($Mode)) { return $Mode }
+    Write-Host "`n请选择推理模式：" -ForegroundColor Yellow
+    Write-Host "[1] CPU：下载和配置较少，不需要 NVIDIA 显卡；但推理较慢。"
+    Write-Host "[2] GPU：需要 NVIDIA 显卡和兼容的 CUDA 驱动/运行组件；下载和配置较多，但推理效率高。"
+    do { $choice = (Read-Host "请输入 1 或 2").Trim() } while ($choice -notin @("1", "2"))
+    if ($choice -eq "1") { return "CPU" }
+    return "GPU"
+}
 
-Write-Step "Prepare Python 3.9/3.10 virtual environment"
+$installMode = Select-InstallMode
+$requirementsName = if ($installMode -eq "GPU") { "requirements-gpu.txt" } else { "requirements-cpu.txt" }
+$requirementsPath = Join-Path $projectDir $requirementsName
+
+Write-Host "OwVoice 首次配置" -ForegroundColor Green
+Write-Host ("项目目录: " + $projectDir)
+Write-Host ("安装模式: " + $installMode)
+
+if ($installMode -eq "GPU" -and $null -eq (Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue)) {
+    throw "未检测到 nvidia-smi.exe。GPU 模式需要 NVIDIA 显卡及正常安装的 NVIDIA 驱动；可重新运行并选择 CPU。"
+}
+if (-not (Test-Path -LiteralPath $requirementsPath -PathType Leaf)) { throw "$requirementsName 不存在。" }
+
+Write-Step "准备 Python 3.10 x64 虚拟环境"
 $reuseVenv = $false
 if (Test-Path -LiteralPath $pythonExe -PathType Leaf) {
-    $reuseVenv = ((Get-PythonVersion $pythonExe) -in @("3.9", "3.10"))
+    $venvInfo = Get-PythonInfo $pythonExe
+    $reuseVenv = ($venvInfo -like "3.10|64|*")
+    if (-not $reuseVenv) { throw ".venv 中的 Python 不是 3.10 x64。请先备份需要的内容，再删除 D:\OwVoice\.venv 后重试。" }
 }
 if (-not $reuseVenv) {
-    if (Test-Path -LiteralPath $venvDir) { Remove-Item -LiteralPath $venvDir -Recurse -Force }
     $basePython = Get-BasePython
     $baseArgs = @($script:basePythonArgs)
     & $basePython @baseArgs -m venv $venvDir
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $pythonExe)) { throw "Could not create the Python virtual environment." }
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $pythonExe)) { throw "无法创建 Python 虚拟环境。" }
 }
 
-Write-Step "Install OwVoice and GPT-SoVITS dependencies with pip"
+Write-Step "安装固定版本依赖"
 & $pythonExe -m pip install --upgrade pip
-if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed." }
-$gsvRequirements = Join-Path $projectDir "GPT-SoVITS\requirements.txt"
-if (-not (Test-Path -LiteralPath $gsvRequirements -PathType Leaf)) { throw "GPT-SoVITS source or requirements.txt is missing." }
-& $pythonExe -m pip install -r (Join-Path $projectDir "requirements.txt") -r $gsvRequirements
-if ($LASTEXITCODE -ne 0) { throw "OwVoice or GPT-SoVITS dependency installation failed." }
+if ($LASTEXITCODE -ne 0) { throw "pip 升级失败。" }
+& $pythonExe -m pip install --prefer-binary -r $requirementsPath
+if ($LASTEXITCODE -ne 0) { throw "$requirementsName 安装失败。" }
 
-Write-Step "Install required NLTK data into the project environment"
+Write-Step "安装 NLTK 数据"
 & $pythonExe (Join-Path $projectDir "scripts\download_nltk_data.py")
-if ($LASTEXITCODE -ne 0) { throw "NLTK data installation failed." }
+if ($LASTEXITCODE -ne 0) { throw "NLTK 数据安装失败。" }
 
-Write-Step "Download required GPT-SoVITS pretrained assets"
+Write-Step "下载 GPT-SoVITS 必需资源"
 & $pythonExe (Join-Path $projectDir "scripts\download_pretrained.py")
-if ($LASTEXITCODE -ne 0) { throw "GPT-SoVITS pretrained asset download failed." }
+if ($LASTEXITCODE -ne 0) { throw "GPT-SoVITS 预训练资源下载失败。" }
 
-Write-Step "Check voice configuration"
+Write-Step "检查语音配置"
 foreach ($directory in @("output", ".cache\synthesis", "logs")) { New-Item -ItemType Directory -Force -Path (Join-Path $projectDir $directory) | Out-Null }
 if (-not (Test-Path -LiteralPath $configPath)) { Copy-Item -LiteralPath $examplePath -Destination $configPath }
 try { $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json }
-catch { throw "voices.local.json is invalid JSON: $($_.Exception.Message)" }
+catch { throw "voices.local.json 不是有效 JSON：$($_.Exception.Message)" }
 $voices = @($config.voices | Where-Object { $_.enabled -ne $false })
-if ($voices.Count -ne 3) { throw "The first release must contain exactly three enabled voices." }
-function Resolve-ProjectPath([string]$value) {
-    if ([System.IO.Path]::IsPathRooted($value)) { return [System.IO.Path]::GetFullPath($value) }
-    return [System.IO.Path]::GetFullPath((Join-Path $projectDir $value))
-}
-$missing = @()
-foreach ($voice in $voices) {
-    foreach ($field in @("gpt_model", "sovits_model", "reference_audio")) {
-        $path = Resolve-ProjectPath ([string]$voice.$field)
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { $missing += "$($voice.id): $field -> $path" }
+if ($voices.Count -lt 1) {
+    Write-Host "没有配置本地语音模型，继续完成环境配置。" -ForegroundColor Yellow
+} else {
+    function Resolve-ProjectPath([string]$value) {
+        if ([System.IO.Path]::IsPathRooted($value)) { return [System.IO.Path]::GetFullPath($value) }
+        return [System.IO.Path]::GetFullPath((Join-Path $projectDir $value))
     }
+    $missing = @()
+    foreach ($voice in $voices) {
+        foreach ($field in @("gpt_model", "sovits_model", "reference_audio")) {
+            $path = Resolve-ProjectPath ([string]$voice.$field)
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { $missing += "$($voice.id): $field -> $path" }
+        }
+    }
+    if ($missing.Count -gt 0) { $missing | ForEach-Object { Write-Host $_ -ForegroundColor Yellow }; throw "模型或参考音频文件缺失。" }
 }
-if ($missing.Count -gt 0) { $missing | ForEach-Object { Write-Host $_ -ForegroundColor Yellow }; throw "A model or reference audio file is missing." }
 
-Write-Step "Check GPT-SoVITS"
-$gsvApi = Join-Path $projectDir "GPT-SoVITS\api.py"
-if (-not (Test-Path -LiteralPath $gsvApi -PathType Leaf)) { throw "GPT-SoVITS api.py is missing." }
-& $pythonExe -c "import torch; print('PyTorch', torch.__version__, 'CUDA', torch.version.cuda)"
-if ($LASTEXITCODE -ne 0) { throw "PyTorch could not be imported. Check the NVIDIA/PyTorch installation." }
-Write-Host "Setup complete. Run OwVoice.exe." -ForegroundColor Green
+Write-Step "检查 PyTorch"
+$torchCheck = "import torch; print('PyTorch', torch.__version__, 'CUDA', torch.version.cuda, '可用', torch.cuda.is_available()); raise SystemExit(0 if '$installMode' != 'GPU' or torch.cuda.is_available() else 2)"
+& $pythonExe -c $torchCheck
+if ($LASTEXITCODE -ne 0) { throw "GPU 模式下 PyTorch 未检测到可用 CUDA。请检查 NVIDIA 驱动，或重新选择 CPU 模式。" }
+
+Write-Host "`n配置完成。" -ForegroundColor Green
+$releaseExe = Join-Path $projectDir "OwVoice.exe"
+$sourceRunScript = Join-Path $projectDir "scripts\run.ps1"
+if ((Test-Path -LiteralPath $releaseExe -PathType Leaf) -and -not (Test-Path -LiteralPath $sourceRunScript -PathType Leaf)) {
+    Write-Host "普通用户请双击 OwVoice.exe 启动。" -ForegroundColor Green
+} elseif (Test-Path -LiteralPath $sourceRunScript -PathType Leaf) {
+    Write-Host "源码运行请执行：.\scripts\run.ps1" -ForegroundColor Green
+} else {
+    Write-Host "请运行 OwVoice.exe 启动程序。" -ForegroundColor Green
+}

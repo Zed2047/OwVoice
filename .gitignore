@@ -18,12 +18,15 @@ GPT-SoVITS/__pycache__/
 GPT-SoVITS/ffmpeg.exe
 GPT-SoVITS/ffprobe.exe
 GPT-SoVITS/tools/AP_BWE_main/24kto48k/g_24kto48k.zip
+GPT-SoVITS/tools/asr/models/
+GPT-SoVITS/tools/uvr5/uvr5_weights/
 engine/
 models/**/*.ckpt
 models/**/*.pth
 models/**/*.pt
 models/**/*.bin
 models/**/*.safetensors
+data/
 config/voices.local.json
 .runtime/
 dist/
@@ -44,6 +47,17 @@ output/
 # 日志与本地配置
 logs/
 .env
+
+# 本地 AI 协作资料与测试素材
+docs/
+AGENTS.md
+MODEL_PACKAGE_SPEC.md
+普通用户测试/
+UserTest-Current/
+旧版模型/
+训练/
+test-model/
+assets/avatars/
 
 # 编辑器文件
 .vscode/

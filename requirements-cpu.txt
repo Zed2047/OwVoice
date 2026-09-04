@@ -1,0 +1,7 @@
+# CPU 模式：下载量较少，不需要 NVIDIA 显卡，但推理速度较慢。
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch==2.7.0+cpu
+torchaudio==2.7.0+cpu
+onnxruntime==1.23.2
+-r requirements-common.txt

@@ -371,6 +371,7 @@ class Speaker:
 
 
 speaker_list = {}
+_model_lock = threading.RLock()
 _reference_cache_lock = threading.Lock()
 _performance_diagnostics = os.environ.get("OWVOICE_PERF_DIAGNOSTICS", "0").strip().lower() not in {
     "0",
@@ -507,14 +508,42 @@ def get_gpt_weights(gpt_path):
 
 
 def change_gpt_sovits_weights(gpt_path, sovits_path):
-    try:
-        gpt = get_gpt_weights(gpt_path)
-        sovits = get_sovits_weights(sovits_path)
-    except Exception as e:
-        return JSONResponse({"code": 400, "message": str(e)}, status_code=400)
+    with _model_lock:
+        try:
+            gpt = get_gpt_weights(gpt_path)
+            sovits = get_sovits_weights(sovits_path)
+        except Exception as e:
+            return JSONResponse({"code": 400, "message": str(e)}, status_code=400)
 
-    speaker_list["default"] = Speaker(name="default", gpt=gpt, sovits=sovits)
+        speaker_list["default"] = Speaker(name="default", gpt=gpt, sovits=sovits)
     return JSONResponse({"code": 0, "message": "Success"}, status_code=200)
+
+
+def unload_gpt_sovits_weights():
+    """卸载当前角色权重，但保留 API 进程和基础模型运行。"""
+
+    global gpt_path, sovits_path
+    with _model_lock:
+        for speaker in list(speaker_list.values()):
+            for model in (getattr(speaker, "gpt", None), getattr(speaker, "sovits", None)):
+                if model is not None and hasattr(model, "cpu"):
+                    try:
+                        model.cpu()
+                    except Exception:
+                        pass
+            speaker.reference_cache_key = None
+            speaker.reference_cache = None
+        speaker_list.clear()
+        gpt_path = ""
+        sovits_path = ""
+        clean_hifigan_model()
+        clean_bigvgan_model()
+        clean_sv_cn_model()
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+    return JSONResponse({"code": 0, "message": "Model unloaded"}, status_code=200)
 
 
 def get_bert_feature(text, word2ph):
@@ -1416,6 +1445,11 @@ async def set_model(
     sovits_model_path: str = None,
 ):
     return change_gpt_sovits_weights(gpt_path=gpt_model_path, sovits_path=sovits_model_path)
+
+
+@app.post("/unload_model")
+async def unload_model():
+    return unload_gpt_sovits_weights()
 
 
 @app.post("/control")

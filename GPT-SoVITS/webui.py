@@ -39,8 +39,6 @@ site_packages_roots = []
 for path in site.getsitepackages():
     if "packages" in path:
         site_packages_roots.append(path)
-if site_packages_roots == []:
-    site_packages_roots = ["%s/runtime/Lib/site-packages" % now_dir]
 # os.environ["OPENBLAS_NUM_THREADS"] = "4"
 os.environ["no_proxy"] = "localhost, 127.0.0.1, ::1"
 os.environ["all_proxy"] = ""
@@ -49,7 +47,6 @@ for site_packages_root in site_packages_roots:
         try:
             with open("%s/users.pth" % (site_packages_root), "w") as f:
                 f.write(
-                    # "%s\n%s/runtime\n%s/tools\n%s/tools/asr\n%s/GPT_SoVITS\n%s/tools/uvr5"
                     "%s\n%s/GPT_SoVITS/BigVGAN\n%s/tools\n%s/tools/asr\n%s/GPT_SoVITS\n%s/tools/uvr5"
                     % (now_dir, now_dir, now_dir, now_dir, now_dir, now_dir)
                 )
@@ -1973,7 +1970,7 @@ with gr.Blocks(title="GPT-SoVITS WebUI", analytics_enabled=False, js=js, css=css
             gr.Markdown(value=i18n("施工中，请静候佳音"))
 
     app.queue().launch(  # concurrency_count=511, max_size=1022
-        server_name="0.0.0.0",
+        server_name="127.0.0.1",
         inbrowser=True,
         share=is_share,
         server_port=webui_port_main,

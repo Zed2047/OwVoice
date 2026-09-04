@@ -50,26 +50,27 @@ class Text2SemanticDataModule(LightningDataModule):
         )
         batch_size = max(min(batch_size, len(self._train_dataset) // 4), 1)  # 防止不保存
         sampler = DistributedBucketSampler(self._train_dataset, batch_size=batch_size)
-        return DataLoader(
-            self._train_dataset,
-            batch_size=batch_size,
-            sampler=sampler,
-            collate_fn=self._train_dataset.collate,
-            num_workers=self.num_workers,
-            persistent_workers=True,
-            prefetch_factor=16,
-        )
+        loader_kwargs = {
+            "batch_size": batch_size,
+            "sampler": sampler,
+            "collate_fn": self._train_dataset.collate,
+            "num_workers": self.num_workers,
+        }
+        if self.num_workers > 0:
+            loader_kwargs.update({"persistent_workers": True, "prefetch_factor": 16})
+        return DataLoader(self._train_dataset, **loader_kwargs)
 
     def val_dataloader(self):
-        return DataLoader(
-            self._dev_dataset,
-            batch_size=1,
-            shuffle=False,
-            collate_fn=self._train_dataset.collate,
-            num_workers=max(self.num_workers, 12),
-            persistent_workers=True,
-            prefetch_factor=16,
-        )
+        num_workers = max(self.num_workers, 12)
+        loader_kwargs = {
+            "batch_size": 1,
+            "shuffle": False,
+            "collate_fn": self._train_dataset.collate,
+            "num_workers": num_workers,
+        }
+        if num_workers > 0:
+            loader_kwargs.update({"persistent_workers": True, "prefetch_factor": 16})
+        return DataLoader(self._dev_dataset, **loader_kwargs)
 
     # 这个会使用到嘛？
     def test_dataloader(self):

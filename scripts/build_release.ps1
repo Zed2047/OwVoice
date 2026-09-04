@@ -1,15 +1,17 @@
 param(
-    [string]$Version = "v0.1.0",
-    [string]$OutputDirectory = "dist"
+    [string]$Version = "v0.1.2",
+    [string]$OutputDirectory = "dist",
+    [switch]$SkipArchive
 )
 
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
-$releaseOutputPath = ".\$OutputDirectory"
-$releaseStagingPath = ".\$OutputDirectory\release-staging"
+$projectRoot = (Get-Location).Path
+$releaseOutputPath = [System.IO.Path]::GetFullPath((Join-Path $projectRoot $OutputDirectory))
+$releaseStagingPath = Join-Path $releaseOutputPath "release-staging"
 $releaseName = "OwVoice-$Version"
-$releasePackagePath = ".\$OutputDirectory\release-staging\$releaseName"
-$releaseArchivePath = ".\$OutputDirectory\$releaseName.zip"
+$releasePackagePath = Join-Path $releaseStagingPath $releaseName
+$releaseArchivePath = Join-Path $releaseOutputPath "$releaseName.zip"
 
 New-Item -ItemType Directory -Force -Path $releaseOutputPath | Out-Null
 if (Test-Path -LiteralPath $releaseStagingPath) { Remove-Item -LiteralPath $releaseStagingPath -Recurse -Force }
@@ -19,8 +21,13 @@ New-Item -ItemType Directory -Force -Path $releasePackagePath | Out-Null
 function Copy-EngineTree([string]$sourceDirectory, [string]$targetDirectory) {
     New-Item -ItemType Directory -Force -Path $targetDirectory | Out-Null
     foreach ($item in (Get-ChildItem -LiteralPath $sourceDirectory -Force)) {
-        $skipDirectory = $item.PSIsContainer -and ($item.Name -in @("pretrained_models", "__pycache__", ".git", "G2PWModel"))
-        $skipFile = (-not $item.PSIsContainer) -and ($item.Extension -in @(".bak", ".tmp", ".pyc", ".zip", ".pth", ".pt"))
+        $skipDirectory = $item.PSIsContainer -and ($item.Name -in @("pretrained_models", "__pycache__", ".git", "G2PWModel", "uvr5_weights"))
+        # 这些是本地运行后可自动生成的缓存/编译词典，不应占用发布包空间。
+        $generatedFileNames = @("cmudict_cache.pickle", "engdict_cache.pickle", "namedict_cache.pickle", "user.dict")
+        $skipFile = (-not $item.PSIsContainer) -and (
+            $item.Extension -in @(".bak", ".tmp", ".pyc", ".zip", ".pth", ".pt") -or
+            $item.Name -in $generatedFileNames
+        )
         if ($skipDirectory -or $skipFile) { continue }
         $targetItem = Join-Path $targetDirectory $item.Name
         if ($item.PSIsContainer) {
@@ -31,79 +38,79 @@ function Copy-EngineTree([string]$sourceDirectory, [string]$targetDirectory) {
     }
 }
 
-foreach ($file in @("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "requirements.txt")) {
-    Copy-Item -LiteralPath ".\$file" -Destination $releasePackagePath
+foreach ($file in @("README.md", "AI_SETUP.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "requirements.txt", "requirements-common.txt", "requirements-cpu.txt", "requirements-gpu.txt", "requirements-training.txt", "ENVIRONMENT_AND_TRAINING.md")) {
+    Copy-Item -LiteralPath (Join-Path $projectRoot $file) -Destination $releasePackagePath
 }
 # 发布 ZIP 使用 ASCII 文件名，避免 Windows 压缩工具处理中文文件名时产生乱码。
-[System.IO.File]::Copy(".\setup.bat", ".\dist\release-staging\$releaseName\setup.bat", $true)
-foreach ($directory in @("backend", "frontend", "assets", "config")) {
-    $sourceDirectory = ".\$directory"
-    $targetDirectory = ".\$OutputDirectory\release-staging\$releaseName\$directory"
+[System.IO.File]::Copy((Join-Path (Get-Location) "setup.bat"), (Join-Path $releasePackagePath "setup.bat"), $true)
+foreach ($directory in @("backend", "frontend", "config")) {
+    $sourceDirectory = Join-Path $projectRoot $directory
+    $targetDirectory = Join-Path $releasePackagePath $directory
     New-Item -ItemType Directory -Force -Path $targetDirectory | Out-Null
     Get-ChildItem -LiteralPath $sourceDirectory -Force | Copy-Item -Destination $targetDirectory -Recurse
 }
+# 公开包不携带角色头像等本地素材；用户模型和头像由本地模型库自行管理。
+$releasePackagePath = Join-Path -Path $releaseStagingPath -ChildPath $releaseName
+$assetsTargetPath = Join-Path -Path $releasePackagePath -ChildPath "assets"
+New-Item -ItemType Directory -Force -Path $assetsTargetPath | Out-Null
+Get-ChildItem -LiteralPath (Join-Path $projectRoot "assets") -Force | Where-Object { $_.Name -ne "avatars" } | Copy-Item -Destination $assetsTargetPath -Recurse -Force
 
 # Release 只复制首次配置所需脚本，构建和调试脚本留在源码仓库。
-$releaseScriptsTargetPath = ".\$OutputDirectory\release-staging\$releaseName\scripts"
-New-Item -ItemType Directory -Force -Path ".\$OutputDirectory\release-staging\$releaseName\scripts" | Out-Null
-Copy-Item -LiteralPath ".\scripts\setup.ps1" -Destination ".\$OutputDirectory\release-staging\$releaseName\scripts" -Force
-Copy-Item -LiteralPath ".\scripts\download_pretrained.py" -Destination ".\$OutputDirectory\release-staging\$releaseName\scripts" -Force
-Copy-Item -LiteralPath ".\scripts\download_nltk_data.py" -Destination ".\$OutputDirectory\release-staging\$releaseName\scripts" -Force
+$releaseScriptsTargetPath = Join-Path $releasePackagePath "scripts"
+New-Item -ItemType Directory -Force -Path $releaseScriptsTargetPath | Out-Null
+foreach ($scriptName in @("setup.ps1", "check_env.ps1", "download_pretrained.py", "verify_runtime.py", "setup_training.ps1", "download_nltk_data.py", "update_release.ps1", "start_training.ps1")) {
+    Copy-Item -LiteralPath (Join-Path (Join-Path $projectRoot "scripts") $scriptName) -Destination $releaseScriptsTargetPath -Force
+}
 
 # Copy the modified GPT-SoVITS inference source, excluding its large model store.
-$engineSource = ".\GPT-SoVITS"
-$engineTargetPath = ".\$OutputDirectory\release-staging\$releaseName\GPT-SoVITS"
-New-Item -ItemType Directory -Force -Path ".\$OutputDirectory\release-staging\$releaseName\GPT-SoVITS" | Out-Null
-foreach ($file in @("api.py", "config.py", "extra-req.txt", "requirements.txt", "LICENSE")) {
-    Copy-Item -LiteralPath (Join-Path $engineSource $file) -Destination ".\$OutputDirectory\release-staging\$releaseName\GPT-SoVITS" -Force
+$engineSource = Join-Path $projectRoot "GPT-SoVITS"
+$engineTargetPath = Join-Path $releasePackagePath "GPT-SoVITS"
+New-Item -ItemType Directory -Force -Path $engineTargetPath | Out-Null
+foreach ($file in @("api.py", "config.py", "extra-req.txt", "requirements.txt", "webui.py", "LICENSE")) {
+    Copy-Item -LiteralPath (Join-Path $engineSource $file) -Destination $engineTargetPath -Force
 }
-Copy-EngineTree (Join-Path $engineSource "GPT_SoVITS") ".\$OutputDirectory\release-staging\$releaseName\GPT-SoVITS\GPT_SoVITS"
-$fastLangTargetPath = ".\$OutputDirectory\release-staging\$releaseName\GPT-SoVITS\GPT_SoVITS\pretrained_models\fast_langdetect"
-New-Item -ItemType Directory -Force -Path ".\$OutputDirectory\release-staging\$releaseName\GPT-SoVITS\GPT_SoVITS\pretrained_models\fast_langdetect" | Out-Null
-Copy-Item -LiteralPath (Join-Path $engineSource "GPT_SoVITS\pretrained_models\fast_langdetect\lid.176.bin") -Destination ".\$OutputDirectory\release-staging\$releaseName\GPT-SoVITS\GPT_SoVITS\pretrained_models\fast_langdetect" -Force
-$toolsTargetPath = ".\$OutputDirectory\release-staging\$releaseName\GPT-SoVITS\tools"
-New-Item -ItemType Directory -Force -Path ".\$OutputDirectory\release-staging\$releaseName\GPT-SoVITS\tools" | Out-Null
-foreach ($file in @("__init__.py", "audio_sr.py", "assets.py", "my_utils.py")) {
-    Copy-Item -LiteralPath (Join-Path $engineSource "tools\$file") -Destination ".\$OutputDirectory\release-staging\$releaseName\GPT-SoVITS\tools" -Force
-}
-Copy-EngineTree (Join-Path $engineSource "tools\i18n") ".\$OutputDirectory\release-staging\$releaseName\GPT-SoVITS\tools\i18n"
-Copy-EngineTree (Join-Path $engineSource "tools\AP_BWE_main") ".\$OutputDirectory\release-staging\$releaseName\GPT-SoVITS\tools\AP_BWE_main"
+Copy-EngineTree (Join-Path $engineSource "GPT_SoVITS") (Join-Path $engineTargetPath "GPT_SoVITS")
+# lid.176.bin 由 setup.ps1 -> download_pretrained.py 下载，发布包不重复携带约 125 MB 文件。
+# 训练界面需要 tools/asr、tools/uvr5 等通用源码；Copy-EngineTree 会排除缓存和权重文件。
+$engineTargetPath = Join-Path -Path $releasePackagePath -ChildPath "GPT-SoVITS"
+$toolsTargetPath = Join-Path -Path $engineTargetPath -ChildPath "tools"
+Copy-EngineTree (Join-Path $engineSource "tools") $toolsTargetPath
+Get-ChildItem -LiteralPath $releasePackagePath -Recurse -File | Where-Object { $_.Extension -in @('.bak', '.tmp', '.pyc') } | Remove-Item -Force
+Get-ChildItem -LiteralPath $releasePackagePath -Recurse -Directory | Where-Object { $_.Name -in @('__pycache__', '.pytest_cache') } | Remove-Item -Recurse -Force
+Remove-Item -LiteralPath (Join-Path $releasePackagePath "config\voices.local.json") -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path (Join-Path $releasePackagePath "config") | Out-Null
+Copy-Item -LiteralPath ".\config\voices.example.json" -Destination (Join-Path $releasePackagePath "config") -Force
+Copy-Item -LiteralPath ".\config\voices.example.json" -Destination (Join-Path $releasePackagePath "config\voices.local.json") -Force
 
-Get-ChildItem -LiteralPath ".\$OutputDirectory\release-staging\$releaseName" -Recurse -File | Where-Object { $_.Extension -in @('.bak', '.tmp', '.pyc') } | Remove-Item -Force
-Get-ChildItem -LiteralPath ".\$OutputDirectory\release-staging\$releaseName" -Recurse -Directory | Where-Object { $_.Name -in @('__pycache__', '.pytest_cache') } | Remove-Item -Recurse -Force
-Remove-Item -LiteralPath ".\$OutputDirectory\release-staging\$releaseName\config\voices.local.json" -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path ".\$OutputDirectory\release-staging\$releaseName\config" | Out-Null
-Copy-Item -LiteralPath ".\config\voices.example.json" -Destination ".\$OutputDirectory\release-staging\$releaseName\config" -Force
-Copy-Item -LiteralPath ".\config\voices.example.json" -Destination ".\$OutputDirectory\release-staging\$releaseName\config\voices.local.json" -Force
-
-$voiceFiles = @(
-    @{ dir = "monk"; files = @("monk-gpt-expanded-v3-e10.ckpt", "monk-sovits-emotion-focus-e9.pth", "reference.wav") },
-    @{ dir = "ana"; files = @("ana-gpt-curated-v2-e8.ckpt", "ana-sovits-emotion-focus-e7.pth", "reference.wav") },
-    @{ dir = "doomfist"; files = @("doomfist-gpt-expanded-v3-e10.ckpt", "doomfist-sovits-curated-v4-e7.pth", "reference.wav") }
-)
-foreach ($voice in $voiceFiles) {
-    $targetPath = ".\$OutputDirectory\release-staging\$releaseName\models\$($voice.dir)"
-    New-Item -ItemType Directory -Force -Path ".\$OutputDirectory\release-staging\$releaseName\models\$($voice.dir)" | Out-Null
-    foreach ($file in $voice.files) {
-        $sourceFile = Join-Path (Get-Location).Path (Join-Path (Join-Path "models" $voice.dir) $file)
-        if (-not (Test-Path -LiteralPath $sourceFile -PathType Leaf)) { throw "Missing release file: $sourceFile" }
-        Copy-Item -LiteralPath $sourceFile -Destination ".\$OutputDirectory\release-staging\$releaseName\models\$($voice.dir)"
-    }
-}
-
-$exeSource = ".\dist\exe\OwVoice"
-if (-not (Test-Path -LiteralPath ".\dist\exe\OwVoice\OwVoice.exe" -PathType Leaf)) {
+# 公开发布包不包含任何角色模型权重；本地模型由用户自行导入到独立数据目录。
+$releasePackagePath = Join-Path -Path $releaseStagingPath -ChildPath $releaseName
+$releaseModelsPath = Join-Path $releasePackagePath "data\models"
+New-Item -ItemType Directory -Force -Path $releaseModelsPath | Out-Null
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$emptyRegistry = @{ schema = 1; models = @() } | ConvertTo-Json
+[System.IO.File]::WriteAllText((Join-Path $releaseModelsPath "installed-models.json"), $emptyRegistry, $utf8NoBom)
+$emptyConfig = @{ version = 1; voices = @() } | ConvertTo-Json
+[System.IO.File]::WriteAllText((Join-Path $releasePackagePath "config\voices.example.json"), $emptyConfig, $utf8NoBom)
+[System.IO.File]::WriteAllText((Join-Path $releasePackagePath "config\voices.local.json"), $emptyConfig, $utf8NoBom)
+$exeSource = Join-Path $projectRoot "dist\exe\OwVoice"
+if (-not (Test-Path -LiteralPath (Join-Path $exeSource "OwVoice.exe") -PathType Leaf)) {
     throw "OwVoice.exe is missing. Run scripts\build_exe.ps1 before building the release package."
 }
-Copy-Item -LiteralPath ".\dist\exe\OwVoice\OwVoice.exe" -Destination ".\$OutputDirectory\release-staging\$releaseName" -Force
-Copy-Item -LiteralPath ".\dist\exe\OwVoice\_internal" -Destination ".\$OutputDirectory\release-staging\$releaseName" -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $exeSource "OwVoice.exe") -Destination $releasePackagePath -Force
+Copy-Item -LiteralPath (Join-Path $exeSource "_internal") -Destination $releasePackagePath -Recurse -Force
+
+$stagingOnlyPath = Join-Path $releaseStagingPath $releaseName
+if ($SkipArchive) {
+    Write-Host ("Release staging complete (no ZIP created): {0}" -f $stagingOnlyPath) -ForegroundColor Green
+    return
+}
 
 $tar = Get-Command tar.exe -ErrorAction SilentlyContinue
 if ($null -ne $tar) {
     & $tar.Source -a -cf $releaseArchivePath -C $releaseStagingPath $releaseName
     if ($LASTEXITCODE -ne 0) { throw "Release ZIP creation failed." }
 } else {
-    Compress-Archive -LiteralPath ".\$OutputDirectory\release-staging\$releaseName" -DestinationPath $releaseArchivePath -CompressionLevel Optimal
+    Compress-Archive -LiteralPath $releasePackagePath -DestinationPath $releaseArchivePath -CompressionLevel Optimal
 }
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $releaseArchivePath).Hash.ToLowerInvariant()
 $size = (Get-Item -LiteralPath $releaseArchivePath).Length

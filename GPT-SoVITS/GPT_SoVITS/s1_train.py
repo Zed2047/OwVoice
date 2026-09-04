@@ -6,7 +6,7 @@ if "_CUDA_VISIBLE_DEVICES" in os.environ:
 import argparse
 import logging
 import platform
-from pathlib import Path
+from pathlib import Path, WindowsPath
 
 import torch
 from AR.data.data_module import Text2SemanticDataModule
@@ -114,16 +114,17 @@ def main(args):
         # val_check_interval=9999999999999999999999,###不要验证
         # check_val_every_n_epoch=None,
         limit_val_batches=0,
-        devices=-1 if torch.cuda.is_available() else 1,
+        # OwVoice 固定使用本机单卡；单卡不启用 DDP，避免 Windows 下额外 rank
+        # 子进程和 gloo/Rich 收尾阶段造成卡死或 GBK 编码异常。
+        devices=1,
         benchmark=False,
         fast_dev_run=False,
-        strategy=DDPStrategy(process_group_backend="nccl" if platform.system() != "Windows" else "gloo")
-        if torch.cuda.is_available()
-        else "auto",
+        strategy="auto",
         precision=config["train"]["precision"],
         logger=logger,
         num_sanity_val_steps=0,
         callbacks=[ckpt_callback],
+        enable_progress_bar=False,
         use_distributed_sampler=False,  # 非常简单的修改，但解决了采用自定义的 bucket_sampler 下训练步数不一致的问题！
     )
 
@@ -144,7 +145,15 @@ def main(args):
     except Exception:
         ckpt_path = None
     print("ckpt_path:", ckpt_path)
-    trainer.fit(model, data_module, ckpt_path=ckpt_path)
+    # PyTorch 2.6+ 默认以 weights_only=True 恢复 Lightning checkpoint。
+    # 本 checkpoint 由本机训练过程生成，元数据中可能包含 WindowsPath；仅对白名单
+    # 该类型，避免为了兼容旧 checkpoint 而全局关闭安全加载。
+    safe_globals = getattr(torch.serialization, "safe_globals", None)
+    if safe_globals is None:
+        trainer.fit(model, data_module, ckpt_path=ckpt_path)
+    else:
+        with safe_globals([WindowsPath]):
+            trainer.fit(model, data_module, ckpt_path=ckpt_path)
 
 
 # srun --gpus-per-node=1 --ntasks-per-node=1 python train.py --path-to-configuration configurations/default.yaml
