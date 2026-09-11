@@ -17,7 +17,7 @@ class UpdateManager:
 
     VERSION_PATTERN = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+].*)?$")
 
-    def __init__(self, current_version: str = "0.1.2", repository: str = "Zed2047/OwVoice"):
+    def __init__(self, current_version: str = "0.2.0", repository: str = "Zed2047/OwVoice"):
         self.current_version = current_version.lstrip("v")
         self.release_api = f"https://api.github.com/repos/{repository}/releases/latest"
 
@@ -47,9 +47,10 @@ class UpdateManager:
         assets = [item for item in release.get("assets", []) if isinstance(item, dict)]
         app_asset = self._asset(
             assets,
-            lambda name: name.startswith("OwVoice-") and name.endswith(".zip"),
+            lambda name: name == f"OwVoice-{tag}.zip",
         )
-        manifest_asset = self._asset(assets, lambda name: name == f"release-manifest-{tag}.json")
+        # v2 manifest 避免 0.1.2 的旧更新器误用不安全的整目录替换逻辑。
+        manifest_asset = self._asset(assets, lambda name: name == f"release-manifest-v2-{tag}.json")
         result: dict[str, Any] = {
             "currentVersion": self.current_version,
             "latestVersion": latest_version,
@@ -73,7 +74,11 @@ class UpdateManager:
                 )
                 manifest_response.raise_for_status()
                 manifest = manifest_response.json()
-                if isinstance(manifest, dict):
+                if (
+                    isinstance(manifest, dict)
+                    and manifest.get("schema") == 2
+                    and manifest.get("archive_name") == f"OwVoice-{tag}.zip"
+                ):
                     result["app"]["sha256"] = str(manifest.get("sha256", "")).lower() or None
             except (requests.RequestException, ValueError):
                 result["app"]["sha256"] = None

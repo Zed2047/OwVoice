@@ -1,5 +1,5 @@
-param(
-    [string]$Version = "v0.1.2",
+﻿param(
+    [string]$Version = "v0.2.0",
     [string]$OutputDirectory = "dist",
     [switch]$SkipArchive
 )
@@ -38,7 +38,7 @@ function Copy-EngineTree([string]$sourceDirectory, [string]$targetDirectory) {
     }
 }
 
-foreach ($file in @("README.md", "MODEL_PACKAGE_SPEC.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "requirements-cpu.txt", "requirements-gpu.txt", "requirements-training.txt")) {
+foreach ($file in @("README.md", "CHANGELOG.md", "MODEL_PACKAGE_SPEC.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "pyproject.toml", "uv.lock", "requirements-cpu.txt", "requirements-gpu.txt", "requirements-training.txt")) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $file) -Destination $releasePackagePath
 }
 # 发布 ZIP 使用 ASCII 文件名，避免 Windows 压缩工具处理中文文件名时产生乱码。
@@ -59,9 +59,16 @@ Get-ChildItem -LiteralPath (Join-Path $projectRoot "assets") -Force | Where-Obje
 # Release 只复制首次配置所需脚本，构建和调试脚本留在源码仓库。
 $releaseScriptsTargetPath = Join-Path $releasePackagePath "scripts"
 New-Item -ItemType Directory -Force -Path $releaseScriptsTargetPath | Out-Null
-foreach ($scriptName in @("setup.ps1", "check_env.ps1", "download_pretrained.py", "verify_runtime.py", "setup_training.ps1", "download_nltk_data.py", "update_release.ps1", "start_training.ps1")) {
+foreach ($scriptName in @("setup_v2.ps1", "check_env.ps1", "download_pretrained.py", "verify_runtime.py", "setup_training.ps1", "download_nltk_data.py", "update_release.ps1", "repair_update_legacy.ps1", "start_training.ps1")) {
     Copy-Item -LiteralPath (Join-Path (Join-Path $projectRoot "scripts") $scriptName) -Destination $releaseScriptsTargetPath -Force
 }
+
+# 内置固定版本、带签名且经过哈希校验的 uv；用户无需预装 Python 或配置 PATH。
+$uvSource = Join-Path $projectRoot "tools\uv\uv.exe"
+if (-not (Test-Path -LiteralPath $uvSource -PathType Leaf)) { throw "缺少内置安装工具：tools\uv\uv.exe" }
+$uvTarget = Join-Path $releasePackagePath "tools\uv"
+New-Item -ItemType Directory -Force -Path $uvTarget | Out-Null
+Copy-Item -LiteralPath $uvSource -Destination $uvTarget -Force
 
 # Copy the modified GPT-SoVITS inference source, excluding its large model store.
 $engineSource = Join-Path $projectRoot "GPT-SoVITS"
@@ -86,6 +93,10 @@ Copy-Item -LiteralPath ".\config\voices.example.json" -Destination (Join-Path $r
 # 公开发布包不包含任何角色模型权重；本地模型由用户自行导入到独立数据目录。
 $releasePackagePath = Join-Path -Path $releaseStagingPath -ChildPath $releaseName
 $releaseModelsPath = Join-Path $releasePackagePath "data\models"
+# 防御式清理：即使未来复制逻辑扩展，也绝不允许开发机的 data/models
+# 或旧 installed-models.json 进入公开发布包。
+$releaseDataPath = Join-Path $releasePackagePath "data"
+if (Test-Path -LiteralPath $releaseDataPath) { Remove-Item -LiteralPath $releaseDataPath -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $releaseModelsPath | Out-Null
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $emptyRegistry = @{ schema = 1; models = @() } | ConvertTo-Json
@@ -99,6 +110,29 @@ if (-not (Test-Path -LiteralPath (Join-Path $exeSource "OwVoice.exe") -PathType 
 }
 Copy-Item -LiteralPath (Join-Path $exeSource "OwVoice.exe") -Destination $releasePackagePath -Force
 Copy-Item -LiteralPath (Join-Path $exeSource "_internal") -Destination $releasePackagePath -Recurse -Force
+
+# 发布前硬性检查用户数据隔离。以后即使复制规则被修改，也不能静默把开发机
+# 的模型、训练记录、虚拟环境或缓存带入公开包。
+$registryCheckPath = Join-Path $releasePackagePath "data\models\installed-models.json"
+$releaseDataFiles = @(Get-ChildItem -LiteralPath (Join-Path $releasePackagePath "data") -Recurse -File -Force)
+if ($releaseDataFiles.Count -ne 1 -or $releaseDataFiles[0].FullName -ne $registryCheckPath) {
+    throw "发布包 data 目录包含意外文件：$($releaseDataFiles.FullName -join ', ')"
+}
+$registryCheck = Get-Content -LiteralPath $registryCheckPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if (@($registryCheck.models).Count -ne 0) { throw "发布包模型注册表不是空的。" }
+$configCheck = Get-Content -LiteralPath (Join-Path $releasePackagePath "config\voices.local.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+if (@($configCheck.voices).Count -ne 0) { throw "发布包语音配置不是空的。" }
+foreach ($relativePath in @(".venv", ".runtime", ".cache", "logs", "output", "data\training", "assets\avatars")) {
+    if (Test-Path -LiteralPath (Join-Path $releasePackagePath $relativePath)) {
+        throw "发布包包含禁止的本地数据目录：$relativePath"
+    }
+}
+$modelArtifacts = @(Get-ChildItem -LiteralPath $releasePackagePath -Recurse -File -Force | Where-Object {
+    $_.Extension.ToLowerInvariant() -in @(".ckpt", ".pth", ".pt", ".onnx", ".safetensors", ".wav", ".mp3", ".flac")
+})
+if ($modelArtifacts.Count -gt 0) {
+    throw "发布包包含模型或音频文件：$($modelArtifacts.FullName -join ', ')"
+}
 
 $stagingOnlyPath = Join-Path $releaseStagingPath $releaseName
 if ($SkipArchive) {
@@ -115,5 +149,7 @@ if ($null -ne $tar) {
 }
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $releaseArchivePath).Hash.ToLowerInvariant()
 $size = (Get-Item -LiteralPath $releaseArchivePath).Length
-[PSCustomObject]@{ version=$Version; archive_name=(Split-Path -Leaf $releaseArchivePath); sha256=$hash; size_bytes=$size } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $releaseOutputPath "release-manifest-$Version.json") -Encoding UTF8
+$manifestPath = Join-Path $releaseOutputPath "release-manifest-v2-$Version.json"
+$manifestJson = [PSCustomObject]@{ schema=2; version=$Version; archive_name=(Split-Path -Leaf $releaseArchivePath); sha256=$hash; size_bytes=$size } | ConvertTo-Json
+[System.IO.File]::WriteAllText($manifestPath, $manifestJson, (New-Object System.Text.UTF8Encoding($false)))
 Write-Host ("Release ZIP complete: {0} MB, SHA256: {1}" -f [Math]::Round($size / 1MB, 1), $hash) -ForegroundColor Green

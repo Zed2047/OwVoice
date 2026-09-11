@@ -17,6 +17,7 @@ GPT-SoVITS/TEMP/
 GPT-SoVITS/__pycache__/
 GPT-SoVITS/ffmpeg.exe
 GPT-SoVITS/ffprobe.exe
+GPT-SoVITS/weight.json
 GPT-SoVITS/tools/AP_BWE_main/24kto48k/g_24kto48k.zip
 GPT-SoVITS/tools/asr/models/
 GPT-SoVITS/tools/uvr5/uvr5_weights/

@@ -507,15 +507,19 @@ def get_gpt_weights(gpt_path):
     return gpt
 
 
-def change_gpt_sovits_weights(gpt_path, sovits_path):
+def change_gpt_sovits_weights(gpt_model_path, sovits_model_path):
+    global gpt_path, sovits_path
     with _model_lock:
         try:
-            gpt = get_gpt_weights(gpt_path)
-            sovits = get_sovits_weights(sovits_path)
+            gpt = get_gpt_weights(gpt_model_path)
+            sovits = get_sovits_weights(sovits_model_path)
         except Exception as e:
             return JSONResponse({"code": 400, "message": str(e)}, status_code=400)
 
         speaker_list["default"] = Speaker(name="default", gpt=gpt, sovits=sovits)
+        # 只有新模型完整加载成功后才更新路径，避免失败时覆盖旧状态。
+        gpt_path = gpt_model_path
+        sovits_path = sovits_model_path
     return JSONResponse({"code": 0, "message": "Success"}, status_code=200)
 
 
@@ -1422,7 +1426,7 @@ if is_half:
 else:
     bert_model = bert_model.to(device)
     ssl_model = ssl_model.to(device)
-change_gpt_sovits_weights(gpt_path=gpt_path, sovits_path=sovits_path)
+change_gpt_sovits_weights(gpt_model_path=gpt_path, sovits_model_path=sovits_path)
 
 
 # --------------------------------
@@ -1435,7 +1439,8 @@ app = FastAPI()
 async def set_model(request: Request):
     json_post_raw = await request.json()
     return change_gpt_sovits_weights(
-        gpt_path=json_post_raw.get("gpt_model_path"), sovits_path=json_post_raw.get("sovits_model_path")
+        gpt_model_path=json_post_raw.get("gpt_model_path"),
+        sovits_model_path=json_post_raw.get("sovits_model_path"),
     )
 
 
@@ -1444,12 +1449,24 @@ async def set_model(
     gpt_model_path: str = None,
     sovits_model_path: str = None,
 ):
-    return change_gpt_sovits_weights(gpt_path=gpt_model_path, sovits_path=sovits_model_path)
+    return change_gpt_sovits_weights(gpt_model_path=gpt_model_path, sovits_model_path=sovits_model_path)
 
 
 @app.post("/unload_model")
 async def unload_model():
     return unload_gpt_sovits_weights()
+
+
+@app.get("/model_status")
+async def model_status():
+    """返回当前权重是否已加载，供 OwVoice 后端避免使用过期状态。"""
+    with _model_lock:
+        loaded = "default" in speaker_list
+        return {
+            "loaded": loaded,
+            "gpt_model_path": str(gpt_path) if loaded else "",
+            "sovits_model_path": str(sovits_path) if loaded else "",
+        }
 
 
 @app.post("/control")

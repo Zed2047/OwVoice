@@ -11,6 +11,9 @@ $venvDir = Join-Path $projectDir ".venv"
 $pythonExe = Join-Path $venvDir "Scripts\python.exe"
 $configPath = Join-Path $projectDir "config\voices.local.json"
 $examplePath = Join-Path $projectDir "config\voices.example.json"
+$cacheDir = Join-Path $projectDir ".cache"
+$pipCacheDir = Join-Path $cacheDir "pip"
+$setupStatePath = Join-Path $cacheDir "setup-state.json"
 
 function Write-Step([string]$message) { Write-Host ("`n[" + $message + "]") -ForegroundColor Cyan }
 
@@ -48,6 +51,34 @@ function Get-PythonInfo([string]$path) {
     return (& $path -c "import platform, struct, sys; print('%d.%d|%d|%s' % (sys.version_info[0], sys.version_info[1], struct.calcsize('P') * 8, platform.python_implementation()))").Trim()
 }
 
+function Test-DependencyState([string]$requirementsHash) {
+    if (-not (Test-Path -LiteralPath $setupStatePath -PathType Leaf)) { return $false }
+    try {
+        $state = Get-Content -LiteralPath $setupStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($state.dependenciesReady -ne $true -or $state.mode -ne $installMode -or $state.requirementsSha256 -ne $requirementsHash) {
+            return $false
+        }
+        & $pythonExe -m pip check | Out-Host
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    }
+}
+
+function Save-DependencyState([string]$requirementsHash) {
+    New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+    $state = [ordered]@{
+        schema = 1
+        dependenciesReady = $true
+        mode = $installMode
+        requirementsFile = $requirementsName
+        requirementsSha256 = $requirementsHash
+        python = Get-PythonInfo $pythonExe
+        updatedAt = [DateTime]::UtcNow.ToString("o")
+    } | ConvertTo-Json
+    [System.IO.File]::WriteAllText($setupStatePath, $state, (New-Object System.Text.UTF8Encoding($false)))
+}
+
 function Select-InstallMode {
     if (-not [string]::IsNullOrWhiteSpace($Mode)) { return $Mode }
     Write-Host "`n请选择推理模式：" -ForegroundColor Yellow
@@ -76,7 +107,7 @@ $reuseVenv = $false
 if (Test-Path -LiteralPath $pythonExe -PathType Leaf) {
     $venvInfo = Get-PythonInfo $pythonExe
     $reuseVenv = ($venvInfo -like "3.10|64|*")
-    if (-not $reuseVenv) { throw ".venv 中的 Python 不是 3.10 x64。请先备份需要的内容，再删除 D:\OwVoice\.venv 后重试。" }
+    if (-not $reuseVenv) { throw ".venv 中的 Python 不是 3.10 x64。请先备份需要的内容，再删除 $venvDir 后重试。" }
 }
 if (-not $reuseVenv) {
     $basePython = Get-BasePython
@@ -85,11 +116,21 @@ if (-not $reuseVenv) {
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $pythonExe)) { throw "无法创建 Python 虚拟环境。" }
 }
 
-Write-Step "安装固定版本依赖"
-& $pythonExe -m pip install --upgrade pip
-if ($LASTEXITCODE -ne 0) { throw "pip 升级失败。" }
-& $pythonExe -m pip install --prefer-binary -r $requirementsPath
-if ($LASTEXITCODE -ne 0) { throw "$requirementsName 安装失败。" }
+$requirementsHash = (Get-FileHash -LiteralPath $requirementsPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if (Test-DependencyState $requirementsHash) {
+    Write-Step "复用已安装的 Python 依赖"
+    Write-Host "依赖清单未变化且 pip check 通过，跳过重复安装。" -ForegroundColor Green
+} else {
+    Write-Step "安装固定版本依赖"
+    New-Item -ItemType Directory -Force -Path $pipCacheDir | Out-Null
+    & $pythonExe -m pip install --cache-dir $pipCacheDir --upgrade pip
+    if ($LASTEXITCODE -ne 0) { throw "pip 升级失败。" }
+    & $pythonExe -m pip install --cache-dir $pipCacheDir --prefer-binary -r $requirementsPath
+    if ($LASTEXITCODE -ne 0) { throw "$requirementsName 安装失败。" }
+    & $pythonExe -m pip check
+    if ($LASTEXITCODE -ne 0) { throw "$requirementsName 已安装，但依赖完整性检查失败。" }
+    Save-DependencyState $requirementsHash
+}
 
 Write-Step "安装 NLTK 数据"
 & $pythonExe (Join-Path $projectDir "scripts\download_nltk_data.py")

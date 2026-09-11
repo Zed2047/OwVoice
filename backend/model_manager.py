@@ -71,6 +71,45 @@ class ModelManager:
             if item.is_file() and item.suffix.casefold() in self.FORBIDDEN_EXTENSIONS:
                 raise ModelManagerError(f"模型包包含禁止导入的文件类型：{item.name}")
 
+    def _model_record(self, metadata: dict[str, Any], model_root: Path) -> InstalledModel:
+        """根据已校验的模型目录生成注册项，目录名与模型 ID 可以不同。"""
+
+        model_id = str(metadata["id"])
+        files = [
+            str(item.relative_to(model_root)).replace("\\", "/")
+            for item in model_root.rglob("*")
+            if item.is_file()
+        ]
+        return InstalledModel(
+            id=model_id,
+            name=str(metadata.get("display_name") or metadata.get("name") or model_id),
+            version=str(metadata.get("version", "0.0.0")),
+            path=str(Path("models") / model_root.name).replace("\\", "/"),
+            files=sorted(files),
+        )
+
+    def _finish_in_place_import(
+        self,
+        source: Path,
+        metadata: dict[str, Any],
+        metadata_changed: bool,
+    ) -> dict[str, Any]:
+        """登记已经位于 data/models 一级目录中的模型，不复制大文件。"""
+
+        try:
+            if metadata_changed:
+                if metadata.get("avatar") == "avatar.svg":
+                    _ow_write_default_avatar(source / "avatar.svg", metadata.get("name", metadata["id"]))
+                (source / "model.json").write_text(
+                    json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+            model = self._model_record(metadata, source)
+            register_installed_model(self.project_dir, model)
+            return {**model.to_dict(), **metadata, "installed": True, "source": "local"}
+        except (OSError, ModelCatalogError) as exc:
+            raise ModelManagerError(f"无法登记模型目录：{source}（{exc}）") from exc
+
     def list_models(self, refresh: bool = False) -> list[dict[str, Any]]:
         del refresh
         result: list[dict[str, Any]] = []
@@ -117,8 +156,11 @@ class ModelManager:
             raise ModelManagerError("请选择包含 model.json 的单个模型目录")
         try:
             metadata = json.loads((source / "model.json").read_text(encoding="utf-8-sig"))
+            if not isinstance(metadata, dict):
+                raise ModelManagerError("model.json 顶层必须是对象")
             model_id = str(metadata.get("id", "")).strip()
             validate_model_id(model_id)
+            metadata["id"] = model_id
             self._validate_package_files(source)
             self._validate_metadata(metadata, model_id, source)
             metadata_changed = False
@@ -131,32 +173,49 @@ class ModelManager:
                 else:
                     metadata["avatar"] = "avatar.svg"
                     metadata_changed = True
-        except (OSError, json.JSONDecodeError, ModelCatalogError) as exc:
+        except (OSError, UnicodeError, json.JSONDecodeError, ModelCatalogError) as exc:
             raise ModelManagerError(f"模型元数据无效：{exc}") from exc
-        target = self.character_root / model_id
-        if target.exists():
-            registered = next((item for item in load_installed_models(self.project_dir) if item.id == model_id), None)
-            if registered is not None:
-                raise ModelManagerError(f"模型已经存在：{model_id}")
-            if source != target.resolve():
-                raise ModelManagerError(f"目标模型目录已存在但尚未登记：{target}")
-            existing_metadata_path = target / "model.json"
-            try:
-                existing_metadata = json.loads(existing_metadata_path.read_text(encoding="utf-8-sig"))
-                self._validate_metadata(existing_metadata, model_id, target)
-            except (OSError, json.JSONDecodeError, ModelCatalogError, ModelManagerError) as exc:
-                raise ModelManagerError(f"模型目录已存在但未登记，且内容不完整：{target}") from exc
-            files = [str(item.relative_to(target)).replace("\\", "/") for item in target.rglob("*") if item.is_file()]
-            restored = InstalledModel(
-                id=model_id,
-                name=str(existing_metadata.get("name") or existing_metadata.get("display_name") or model_id),
-                version=str(existing_metadata.get("version", "0.0.0")),
-                path=str(Path("models") / model_id).replace("\\", "/"),
-                files=sorted(files),
+        try:
+            registered_models = load_installed_models(self.project_dir)
+        except ModelCatalogError as exc:
+            raise ModelManagerError(f"模型注册表无效：{exc}") from exc
+        registered = next((item for item in registered_models if item.id == model_id), None)
+        same_directory = next(
+            (item for item in registered_models if self._model_root(item) == source),
+            None,
+        )
+        if same_directory is not None and same_directory.id != model_id:
+            raise ModelManagerError(
+                f"该目录已登记为模型 {same_directory.id}，但当前 model.json 的 id 是 {model_id}。"
+                "请恢复正确的 model.json，或先从模型库移除旧登记。"
             )
-            register_installed_model(self.project_dir, restored)
-            return {**restored.to_dict(), **existing_metadata, "installed": True, "source": "local"}
-        self.character_root.mkdir(parents=True, exist_ok=True)
+        if registered is not None:
+            registered_root = self._model_root(registered)
+            if source == registered_root:
+                result = {**registered.to_dict(), **metadata, "installed": True, "source": "local"}
+                result["already_installed"] = True
+                return result
+            if registered_root.exists():
+                raise ModelManagerError(
+                    f"模型 ID 已存在：{model_id}（当前目录：{registered_root}）"
+                )
+            # 注册项仍在但目录已丢失时，允许重新导入；最终登记会原子替换旧条目。
+
+        try:
+            self.character_root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ModelManagerError(f"无法创建本地模型库目录：{self.character_root}") from exc
+        character_root = self.character_root.resolve()
+        if source.parent == character_root:
+            return self._finish_in_place_import(source, metadata, metadata_changed)
+
+        target = character_root / model_id
+        if target.exists():
+            raise ModelManagerError(
+                f"目标目录已存在但未登记：{target}。"
+                "请在导入窗口选择当前 data\\models 文件夹进行原地登记，"
+                "或修改外部模型 model.json 中的 id 后再导入。"
+            )
         staging_parent = Path(tempfile.mkdtemp(prefix="owvoice-model-staging-", dir=self.character_root))
         staging = staging_parent / model_id
         try:
@@ -169,14 +228,7 @@ class ModelManager:
                     encoding="utf-8",
                 )
             staging.rename(target)
-            files = [str(item.relative_to(target)).replace("\\", "/") for item in target.rglob("*") if item.is_file()]
-            model = InstalledModel(
-                id=model_id,
-                name=str(metadata.get("name", model_id)),
-                version=str(metadata.get("version", "0.0.0")),
-                path=str(Path("models") / model_id).replace("\\", "/"),
-                files=sorted(files),
-            )
+            model = self._model_record(metadata, target)
             register_installed_model(self.project_dir, model)
             return {**model.to_dict(), **metadata, "installed": True, "source": "local"}
         except (OSError, ModelCatalogError) as exc:
@@ -217,18 +269,19 @@ class ModelManager:
     def import_models(self, source_dir: str | Path) -> dict[str, Any]:
         """导入单个模型包或集合目录；每个模型独立校验和提交。"""
         sources = self._discover_model_sources(source_dir)
-        registered_ids = {item.id for item in load_installed_models(self.project_dir)}
         imported: list[dict[str, Any]] = []
+        skipped: list[dict[str, str]] = []
         failed: list[dict[str, str]] = []
         for source in sources:
-            # 选择 data/models 作为集合目录时，已登记的规范模型直接跳过。
-            if source.parent == self.character_root and source.name in registered_ids:
-                continue
             try:
-                imported.append(self.import_model(source))
+                result = self.import_model(source)
+                if result.pop("already_installed", False):
+                    skipped.append({"source": str(source), "id": str(result.get("id", ""))})
+                else:
+                    imported.append(result)
             except ModelManagerError as exc:
                 failed.append({"source": str(source), "error": str(exc)})
-        return {"imported": imported, "failed": failed}
+        return {"imported": imported, "skipped": skipped, "failed": failed}
 
     def install_model(self, model_id: str) -> dict[str, Any]:
         del model_id

@@ -8,7 +8,16 @@ jieba.setLogLevel(logging.CRITICAL)
 # 更改fast_langdetect大模型位置
 from pathlib import Path
 import fast_langdetect
-fast_langdetect.infer._default_detector = fast_langdetect.infer.LangDetector(fast_langdetect.infer.LangDetectConfig(cache_dir=Path(__file__).parent.parent.parent / "pretrained_models" / "fast_langdetect"))
+_LANGDETECT_CACHE_DIR = Path(__file__).parent.parent.parent / "pretrained_models" / "fast_langdetect"
+_LANGDETECT_FULL_MODEL = _LANGDETECT_CACHE_DIR / "lid.176.bin"
+# 完整模型优先；网络受限时使用 fast_langdetect 随包提供的轻量模型，不能阻塞启动。
+_LANGDETECT_MODEL = "full" if _LANGDETECT_FULL_MODEL.is_file() else "lite"
+fast_langdetect.infer._default_detector = fast_langdetect.infer.LangDetector(
+    fast_langdetect.infer.LangDetectConfig(
+        cache_dir=str(_LANGDETECT_CACHE_DIR),
+        model=_LANGDETECT_MODEL,
+    )
+)
 
 
 from split_lang import LangSplitter

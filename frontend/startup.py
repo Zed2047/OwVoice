@@ -74,6 +74,53 @@ def port_open(port: int) -> bool:
         return False
 
 
+def ensure_backend_belongs_to(
+    project_dir: Path,
+    *,
+    attempts: int = 1,
+    retry_delay: float = 0.5,
+) -> None:
+    """确认 8765 是当前 OwVoice 后端，并容忍后端刚启动时的短暂不可用。"""
+
+    expected = project_dir.resolve()
+    last_error: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            # 后端健康接口还会探测 9880；无 GPT-SoVITS 时可能需要数秒才返回。
+            response = requests.get("http://127.0.0.1:8765/api/health", timeout=5)
+            response.raise_for_status()
+            payload = response.json()
+            running_project = payload.get("project_dir")
+            if payload.get("owvoice") is not True or not running_project:
+                raise StartupError(
+                    "端口 8765 已被其他程序或旧版 OwVoice 占用。"
+                    "请关闭其他 OwVoice/相关服务后重试。"
+                )
+            actual = Path(str(running_project)).expanduser().resolve()
+            if actual != expected:
+                raise StartupError(
+                    f"端口 8765 正在使用另一套 OwVoice：{actual}\n"
+                    f"当前安装目录：{expected}\n请关闭另一套 OwVoice 后重试。"
+                )
+            return
+        except StartupError:
+            raise
+        except (OSError, ValueError, requests.RequestException) as exc:
+            last_error = exc
+            if attempt + 1 < max(1, attempts):
+                time.sleep(retry_delay)
+                continue
+            raise StartupError(
+                "OwVoice 本地后端已打开端口，但健康检查暂时没有响应。"
+                "请稍候重试；如果仍失败，请查看 logs\\backend.error.log。"
+            ) from exc
+    if last_error is not None:
+        raise StartupError(
+            "OwVoice 本地后端健康检查失败，请查看 logs\\backend.error.log。"
+        ) from last_error
+    raise StartupError("OwVoice 本地后端健康检查失败。")
+
+
 def resolve_project_path(project_dir: Path, value: str | None) -> Path | None:
     if not value:
         return None
@@ -110,7 +157,7 @@ class StartupWorker(QObject):
         if candidate.is_file():
             return candidate
         raise StartupError(
-            "找不到 OwVoice 运行环境。请先运行 scripts\\setup.ps1。"
+            "找不到 OwVoice 运行环境。请先运行 setup.bat。"
         )
 
     def resolve_nltk_data_dir(self) -> Path | None:
@@ -222,9 +269,10 @@ class StartupWorker(QObject):
 
     def start_gpt_sovits(self, voice: dict) -> None:
         if port_open(9880):
-            self.progress.emit(70)
-            self.status.emit("GPT-SoVITS 已在运行，正在复用……")
-            return
+            raise StartupError(
+                "端口 9880 已被其他 GPT-SoVITS/OwVoice 占用。"
+                "请关闭其他 OwVoice 或 GPT-SoVITS 服务后重试。"
+            )
         self.progress.emit(10)
         self.status.emit("正在启动 GPT-SoVITS 引擎……")
         python_exe = self.resolve_python_exe()
@@ -247,7 +295,7 @@ class StartupWorker(QObject):
         missing_nltk = next((str(path) for path in required_nltk if not path.is_dir()), None)
         if missing_nltk:
             raise StartupError(
-                "缺少 GPT-SoVITS 英文处理资源，请重新运行首次配置.bat。"
+                "缺少 GPT-SoVITS 英文处理资源，请重新运行 setup.bat。"
                 f"\n\n缺少：{missing_nltk}"
             )
         cut_punc = voice.get("inference", {}).get("cut_punc", "，。？！；：,.?!…")
@@ -263,6 +311,7 @@ class StartupWorker(QObject):
 
     def start_backend(self, voice: dict) -> None:
         if port_open(8765):
+            ensure_backend_belongs_to(self.project_dir, attempts=4)
             self.progress.emit(90)
             self.status.emit("OwVoice 后端已在运行，正在复用……")
             return
@@ -277,11 +326,12 @@ class StartupWorker(QObject):
         environment["OWVOICE_INITIAL_VOICE_ID"] = str(voice.get("id", ""))
         process = self.start_process("backend", command, self.project_dir, environment)
         self.wait_for_port(8765, 30, "OwVoice 后端", process, progress_start=72, progress_end=88)
+        ensure_backend_belongs_to(self.project_dir, attempts=20)
         deadline = time.monotonic() + 20
         started = time.monotonic()
         while time.monotonic() < deadline:
             try:
-                if requests.get("http://127.0.0.1:8765/api/health", timeout=2).status_code == 200:
+                if requests.get("http://127.0.0.1:8765/api/health", timeout=5).status_code == 200:
                     self.progress.emit(95)
                     return
             except requests.RequestException:
@@ -534,6 +584,11 @@ def _ow_load_config(self) -> dict:
 
 def _ow_start_gpt_sovits(self, voice: dict | None) -> None:
     if voice is None:
+        if port_open(9880):
+            raise StartupError(
+                "端口 9880 已被其他 GPT-SoVITS/OwVoice 占用。"
+                "请关闭其他 OwVoice 或 GPT-SoVITS 服务后重试。"
+            )
         self.progress.emit(70)
         self.status.emit("暂无本地模型，已跳过 GPT-SoVITS 启动。")
         return
@@ -543,6 +598,7 @@ def _ow_start_gpt_sovits(self, voice: dict | None) -> None:
 def _ow_start_backend(self, voice: dict | None) -> None:
     if voice is None:
         if port_open(8765):
+            ensure_backend_belongs_to(self.project_dir, attempts=4)
             self.progress.emit(95)
             self.status.emit("OwVoice 后端已在运行，正在复用……")
             return
@@ -557,6 +613,7 @@ def _ow_start_backend(self, voice: dict | None) -> None:
         environment["OWVOICE_INITIAL_VOICE_ID"] = ""
         process = self.start_process("backend", command, self.project_dir, environment)
         self.wait_for_port(8765, 60, "OwVoice 后端", process, progress_start=72, progress_end=95)
+        ensure_backend_belongs_to(self.project_dir, attempts=20)
         time.sleep(1.0)
         self.status.emit("OwVoice 本地后端已就绪。")
         return
@@ -566,6 +623,7 @@ def _ow_start_backend(self, voice: dict | None) -> None:
 def _ow_wait_model_catalog(self) -> None:
     """确认后端已经能够读取模型清单，再允许进入首页。"""
 
+    ensure_backend_belongs_to(self.project_dir, attempts=4)
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         try:

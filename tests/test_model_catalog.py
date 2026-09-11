@@ -1,3 +1,8 @@
+import json
+import shutil
+
+import pytest
+
 from backend.model_catalog import (
     InstalledModel,
     ModelCatalogError,
@@ -6,7 +11,7 @@ from backend.model_catalog import (
     save_installed_models,
     validate_model_id,
 )
-from backend.model_manager import ModelManager
+from backend.model_manager import ModelManager, ModelManagerError
 
 
 def test_model_registry_round_trip(tmp_path):
@@ -139,3 +144,184 @@ def test_import_rejects_executable_files(tmp_path):
         assert "禁止导入" in str(exc)
     else:
         raise AssertionError("模型包中的可执行文件未被拒绝")
+
+
+def test_old_absolute_registry_path_is_migrated_when_model_is_local(tmp_path):
+    model_root = tmp_path / "data" / "models" / "juno"
+    _write_test_model(model_root, "juno")
+    registry = tmp_path / "data" / "models" / "installed-models.json"
+    registry.write_text(
+        '{"schema":1,"models":[{"id":"juno","name":"朱诺",'
+        '"version":"1.0.0","path":"D:\\\\OwVoice\\\\data\\\\models\\\\juno",'
+        '"files":["model.json"]}]}',
+        encoding="utf-8",
+    )
+
+    ModelManager(tmp_path)
+
+    models = load_installed_models(tmp_path)
+    assert models[0].path == "models/juno"
+    assert "D:\\OwVoice" not in registry.read_text(encoding="utf-8")
+
+
+def test_old_absolute_registry_keeps_renamed_local_directory(tmp_path):
+    model_root = tmp_path / "data" / "models" / "朱诺__juno"
+    _write_test_model(model_root, "juno")
+    registry = tmp_path / "data" / "models" / "installed-models.json"
+    registry.write_text(
+        '{"schema":1,"models":[{"id":"juno","name":"朱诺",'
+        '"version":"1.0.0","path":"D:\\\\OldOwVoice\\\\data\\\\models\\\\朱诺__juno",'
+        '"files":["model.json"]}]}',
+        encoding="utf-8",
+    )
+
+    models = load_installed_models(tmp_path)
+
+    assert models[0].path == "models/朱诺__juno"
+    assert "OldOwVoice" not in registry.read_text(encoding="utf-8")
+
+
+def test_external_import_does_not_overwrite_unregistered_target(tmp_path):
+    source = tmp_path / "incoming" / "juno"
+    _write_test_model(source, "juno")
+    target = tmp_path / "data" / "models" / "juno"
+    target.parent.mkdir(parents=True)
+    shutil.copytree(source, target)
+
+    with pytest.raises(ModelManagerError, match="目标目录已存在但未登记"):
+        ModelManager(tmp_path).import_model(source)
+    assert load_installed_models(tmp_path) == []
+
+
+def test_import_managed_collection_uses_json_id_and_keeps_directory_name(tmp_path):
+    model_root = tmp_path / "data" / "models" / "朱诺模型"
+    _write_test_model(model_root, "juno")
+
+    result = ModelManager(tmp_path).import_models(tmp_path / "data" / "models")
+
+    assert [item["id"] for item in result["imported"]] == ["juno"]
+    assert result["skipped"] == []
+    assert result["failed"] == []
+    assert load_installed_models(tmp_path)[0].path == "models/朱诺模型"
+    assert not (tmp_path / "data" / "models" / "juno").exists()
+
+
+def test_importing_managed_collection_twice_is_idempotent(tmp_path):
+    model_root = tmp_path / "data" / "models" / "voice-folder"
+    _write_test_model(model_root, "voice001")
+    manager = ModelManager(tmp_path)
+
+    first = manager.import_models(tmp_path / "data" / "models")
+    second = manager.import_models(tmp_path / "data" / "models")
+
+    assert len(first["imported"]) == 1
+    assert second["imported"] == []
+    assert [item["id"] for item in second["skipped"]] == ["voice001"]
+    assert second["failed"] == []
+
+
+def test_import_rejects_model_id_changed_inside_registered_directory(tmp_path):
+    model_root = tmp_path / "data" / "models" / "voice-folder"
+    _write_test_model(model_root, "voice001")
+    manager = ModelManager(tmp_path)
+    manager.import_models(tmp_path / "data" / "models")
+    metadata = json.loads((model_root / "model.json").read_text(encoding="utf-8"))
+    metadata["id"] = "voice002"
+    (model_root / "model.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+    result = manager.import_models(tmp_path / "data" / "models")
+
+    assert result["imported"] == []
+    assert "该目录已登记为模型 voice001" in result["failed"][0]["error"]
+
+
+def test_import_replaces_stale_registry_entry_when_registered_directory_is_missing(tmp_path):
+    stale = InstalledModel("voice001", "旧登记", "1.0.0", "models/missing")
+    save_installed_models(tmp_path, [stale])
+    source = tmp_path / "外部模型" / "voice"
+    _write_test_model(source, "voice001")
+
+    result = ModelManager(tmp_path).import_models(source)
+
+    assert [item["id"] for item in result["imported"]] == ["voice001"]
+    models = load_installed_models(tmp_path)
+    assert len(models) == 1
+    assert models[0].path == "models/voice001"
+
+
+def test_import_external_chinese_path_copies_by_json_id(tmp_path):
+    source = tmp_path / "外部模型" / "任意文件夹名称"
+    _write_test_model(source, "voice001")
+
+    result = ModelManager(tmp_path).import_models(source)
+
+    assert [item["id"] for item in result["imported"]] == ["voice001"]
+    assert (tmp_path / "data" / "models" / "voice001" / "model.json").is_file()
+    assert source.is_dir()
+
+
+def test_invalid_json_shape_returns_readable_error(tmp_path):
+    source = tmp_path / "bad-model"
+    source.mkdir()
+    (source / "model.json").write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
+
+    result = ModelManager(tmp_path).import_models(source)
+
+    assert result["imported"] == []
+    assert "顶层必须是对象" in result["failed"][0]["error"]
+
+
+def test_collection_reports_invalid_model_without_rolling_back_valid_one(tmp_path):
+    collection = tmp_path / "外部模型集合"
+    _write_test_model(collection / "valid", "valid")
+    invalid = collection / "invalid"
+    invalid.mkdir(parents=True)
+    (invalid / "model.json").write_text("{broken", encoding="utf-8")
+
+    result = ModelManager(tmp_path).import_models(collection)
+
+    assert [item["id"] for item in result["imported"]] == ["valid"]
+    assert len(result["failed"]) == 1
+    assert result["failed"][0]["source"].endswith("invalid")
+    assert (tmp_path / "data" / "models" / "valid" / "model.json").is_file()
+
+
+def test_import_api_treats_already_registered_models_as_success(monkeypatch):
+    import backend.server as server
+
+    class FakeModelManager:
+        def import_models(self, _source_dir):
+            return {
+                "imported": [],
+                "skipped": [{"source": "D:/models/juno", "id": "juno"}],
+                "failed": [],
+            }
+
+    monkeypatch.setattr(server, "MODEL_MANAGER", FakeModelManager())
+
+    result = server.import_local_model(server.LocalModelImportRequest(source_dir="D:/models"))
+
+    assert result["status"] == "imported"
+    assert result["models"] == []
+    assert result["skipped"][0]["id"] == "juno"
+
+
+def test_import_api_returns_clear_error_when_every_model_fails(monkeypatch):
+    import backend.server as server
+    from fastapi import HTTPException
+
+    class FakeModelManager:
+        def import_models(self, _source_dir):
+            return {
+                "imported": [],
+                "skipped": [],
+                "failed": [{"source": "D:/models/bad", "error": "model.json 无效"}],
+            }
+
+    monkeypatch.setattr(server, "MODEL_MANAGER", FakeModelManager())
+
+    with pytest.raises(HTTPException, match="没有成功导入任何模型") as exc_info:
+        server.import_local_model(server.LocalModelImportRequest(source_dir="D:/models"))
+
+    assert exc_info.value.status_code == 400
+    assert "model.json 无效" in exc_info.value.detail

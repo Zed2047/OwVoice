@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+import tempfile
 from pathlib import Path
 
 import nltk
@@ -74,14 +75,25 @@ def main() -> int:
         zip_path = DATA_DIR / category / f"{package}.zip"
         resource_dir = DATA_DIR / category / package
         zip_path.parent.mkdir(parents=True, exist_ok=True)
-        if resource_dir.is_dir():
+        marker = resource_dir / ("README" if package == "cmudict" else "averaged_perceptron_tagger.pickle")
+        if package == "averaged_perceptron_tagger_eng":
+            marker = resource_dir / "averaged_perceptron_tagger_eng.weights.json"
+        if marker.is_file() and marker.stat().st_size > 0:
             print(f"NLTK package already installed: {package}")
             continue
         print(f"Downloading NLTK package: {package}")
         try:
             download_package(url, zip_path, package_info["sha256"])
-            with zipfile.ZipFile(zip_path) as archive:
-                archive.extractall(DATA_DIR / category)
+            with tempfile.TemporaryDirectory(prefix="owvoice-nltk-", dir=zip_path.parent) as temporary:
+                temporary_path = Path(temporary)
+                with zipfile.ZipFile(zip_path) as archive:
+                    archive.extractall(temporary_path)
+                extracted = temporary_path / package
+                if not extracted.is_dir():
+                    raise RuntimeError(f"NLTK 压缩包目录结构无效：{package}")
+                if resource_dir.exists():
+                    shutil.rmtree(resource_dir)
+                extracted.rename(resource_dir)
         except (OSError, urllib.error.URLError, RuntimeError, zipfile.BadZipFile) as exc:
             print(f"Failed to download NLTK package {package}: {exc}", file=sys.stderr)
             return 1

@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 
 
 API_URL = os.environ.get("OWVOICE_API", "http://127.0.0.1:8765").rstrip("/")
-APP_VERSION = os.environ.get("OWVOICE_APP_VERSION", "0.1.2")
+APP_VERSION = os.environ.get("OWVOICE_APP_VERSION", "0.2.0")
 PROJECT_DIR = Path(
     os.environ.get("OWVOICE_PROJECT_DIR", Path(__file__).resolve().parents[1])
 )
@@ -75,6 +75,41 @@ def _ow_delete_finished_thread(thread: QThread | None) -> None:
     except RuntimeError:
         # Qt 对象可能已在窗口关闭流程中被回收。
         pass
+
+
+def _voice_default_prompt(voice: dict) -> str:
+    """读取角色模型自带的默认试听文案。"""
+    prompts = voice.get("prompt_texts") or []
+    if isinstance(prompts, str):
+        prompts = [prompts]
+    for prompt in prompts:
+        prompt = str(prompt).strip()
+        if prompt:
+            return prompt
+    return str(voice.get("prompt_text", "")).strip()
+
+
+def _sync_voice_prompt_defaults(
+    loaded_defaults: dict[str, str],
+    prompt_cache: dict[str, str],
+    voices: list[dict],
+) -> set[str]:
+    """模型默认文案变化时，只清除对应角色的旧输入缓存。"""
+    changed: set[str] = set()
+    current: dict[str, str] = {}
+    for voice in voices:
+        voice_id = str(voice.get("id", "")).strip()
+        if not voice_id:
+            continue
+        prompt = _voice_default_prompt(voice)
+        previous = loaded_defaults.get(voice_id)
+        if previous is not None and previous != prompt:
+            changed.add(voice_id)
+            prompt_cache.pop(voice_id, None)
+        current[voice_id] = prompt
+    # 保留暂时被删除角色的旧值，重新导入同 ID 模型时仍能识别默认文案变化。
+    loaded_defaults.update(current)
+    return changed
 
 
 def set_windows_app_identity() -> None:
@@ -465,8 +500,10 @@ class EngineStartWorker(QObject):
     def run(self) -> None:
         try:
             if self._online():
-                self.ready.emit(0)
-                return
+                raise RuntimeError(
+                    "端口 9880 已被其他 GPT-SoVITS/OwVoice 占用。"
+                    "请关闭其他 OwVoice 或 GPT-SoVITS 服务后重试。"
+                )
             if self._cancelled():
                 return
 
@@ -534,9 +571,6 @@ class EngineStartWorker(QObject):
                 if self._cancelled():
                     self._stop_process()
                     return
-                if self._online():
-                    self.ready.emit(self.process.pid if self.process else 0)
-                    return
                 if self.process is not None and self.process.poll() is not None:
                     detail = "GPT-SoVITS 启动后立即退出。"
                     try:
@@ -546,6 +580,9 @@ class EngineStartWorker(QObject):
                     if log:
                         detail += f"\n\n日志尾部：\n{log}"
                     raise RuntimeError(detail)
+                if self._online():
+                    self.ready.emit(self.process.pid if self.process else 0)
+                    return
                 time.sleep(0.5)
             raise RuntimeError("等待 GPT-SoVITS 启动超时，请检查 logs 目录。")
         except Exception as exc:  # noqa: BLE001 - 交给主界面显示
@@ -598,12 +635,14 @@ class ModelActionWorker(QObject):
                 raise RuntimeError(str(payload.get("detail") or response.text or "模型操作失败"))
             if self.action == "import":
                 imported = payload.get("models") or ([] if payload.get("model") is None else [payload.get("model")])
+                skipped = payload.get("skipped") or []
                 failed = payload.get("failed") or []
-                message = (
-                    f"已导入 {len(imported)} 个模型，{len(failed)} 个模型失败"
-                    if failed
-                    else f"本地模型导入完成，共 {len(imported)} 个"
-                )
+                parts = [f"新导入 {len(imported)} 个"]
+                if skipped:
+                    parts.append(f"已存在 {len(skipped)} 个")
+                if failed:
+                    parts.append(f"失败 {len(failed)} 个")
+                message = "本地模型处理完成：" + "，".join(parts)
             else:
                 message = {
                     "install": "模型安装完成",
@@ -1711,6 +1750,7 @@ class OwVoiceApp(QMainWindow):
         self.last_audio = self.output_dir / "last.wav"
         self.last_audio_by_voice: dict[str, Path] = {}
         self.prompt_by_voice: dict[str, str] = {}
+        self._loaded_default_prompts: dict[str, str] = {}
         self.pending_audio: Path | None = None
         self.pending_voice_id: str | None = None
         self.voices: list[dict] = []
@@ -2310,6 +2350,11 @@ class OwVoiceApp(QMainWindow):
             QMessageBox.warning(self, "连接失败", f"无法连接 OwVoice 后端：\n{exc}")
             return
 
+        changed_default_ids = _sync_voice_prompt_defaults(
+            self._loaded_default_prompts,
+            self.prompt_by_voice,
+            voices,
+        )
         self.voices = voices
         for card in self.voice_cards.values():
             card.deleteLater()
@@ -2340,6 +2385,13 @@ class OwVoiceApp(QMainWindow):
         available_ids = {str(voice.get("id")) for voice in self.voices}
         target_voice_id = selected_voice_id if selected_voice_id in available_ids else self.voices[0]["id"]
         self.select_voice(target_voice_id)
+        if target_voice_id in changed_default_ids:
+            current_voice = next(
+                (voice for voice in self.voices if voice.get("id") == target_voice_id),
+                None,
+            )
+            if current_voice is not None:
+                self.text_input.setPlainText(self.default_prompt(current_voice))
 
     def _on_models_changed(self) -> None:
         """模型清单变化后刷新角色，并在空工作台中启动推理引擎。"""
@@ -2479,14 +2531,7 @@ class OwVoiceApp(QMainWindow):
 
     def default_prompt(self, voice: dict) -> str:
         """固定使用角色训练文本列表中的第一条，兼容旧版单条 prompt_text。"""
-        prompts = voice.get("prompt_texts") or []
-        if isinstance(prompts, str):
-            prompts = [prompts]
-        for prompt in prompts:
-            prompt = str(prompt).strip()
-            if prompt:
-                return prompt
-        return str(voice.get("prompt_text", "")).strip()
+        return _voice_default_prompt(voice)
 
     def _sync_speed_from_slider(self, value: int) -> None:
         self.speed_input.setValue(max(0.10, min(3.00, value / 100)))
@@ -2528,12 +2573,15 @@ class OwVoiceApp(QMainWindow):
         self.worker.moveToThread(self.synthesis_thread)
         self.synthesis_thread.started.connect(self.worker.run)
         self.worker.success.connect(self.save_audio)
-        self.worker.failed.connect(lambda message: self.show_error(message))
+        # 直接连接到 QMainWindow 的槽，确保错误对话框在 GUI 线程创建；
+        # 无上下文 lambda 可能在工作线程中操作 QWidget，触发 Qt 跨线程警告。
+        self.worker.failed.connect(self.show_error)
         self.worker.finished.connect(self.synthesis_thread.quit)
         self.worker.finished.connect(self.worker.deleteLater)
         self.synthesis_thread.finished.connect(self._synthesis_finished)
         self.synthesis_thread.start()
 
+    @Slot(bytes)
     def save_audio(self, data: bytes) -> None:
         if self.pending_audio is None:
             self.show_error("未确定输出文件路径")
@@ -2564,6 +2612,7 @@ class OwVoiceApp(QMainWindow):
             self.play_button.setEnabled(True)
         self.set_status("合成完成")
 
+    @Slot(str)
     def show_error(self, message: str) -> None:
         self.set_status("合成失败", error=True)
         QMessageBox.critical(self, "合成失败", message)

@@ -20,7 +20,8 @@ from .utils import load_config
 
 onnxruntime.set_default_logger_severity(3)
 try:
-    onnxruntime.preload_dlls()
+    # OwVoice 统一使用 CPU 版 ONNX Runtime；GPU 推理由 PyTorch 负责。
+    onnxruntime.preload_dlls(cuda=False, cudnn=False)
 except Exception:
     pass
 warnings.filterwarnings("ignore")

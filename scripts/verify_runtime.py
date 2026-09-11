@@ -36,7 +36,7 @@ CORE_IMPORTS = (
 TEXT_IMPORTS = (
     "cn2an",
     "pypinyin",
-    "jieba_fast",
+    "jieba",
     "split_lang",
     "fast_langdetect",
     "wordsegment",
@@ -88,11 +88,17 @@ def add_engine_paths(project_dir: Path) -> None:
 
 
 def check_files(project_dir: Path, *, training: bool = False) -> dict[str, str]:
+    pretrained = project_dir / "GPT-SoVITS" / "GPT_SoVITS" / "pretrained_models"
     required = {
         "engine_api": project_dir / "GPT-SoVITS" / "api.py",
         "ffmpeg": project_dir / "GPT-SoVITS" / "ffmpeg.exe",
         "ffprobe": project_dir / "GPT-SoVITS" / "ffprobe.exe",
         "g2pw": project_dir / "GPT-SoVITS" / "GPT_SoVITS" / "text" / "G2PWModel" / "g2pW.onnx",
+        "hubert": pretrained / "chinese-hubert-base" / "config.json",
+        "roberta": pretrained / "chinese-roberta-wwm-ext-large" / "config.json",
+        "sovits_v4": pretrained / "gsv-v4-pretrained" / "s2Gv4.pth",
+        "vocoder_v4": pretrained / "gsv-v4-pretrained" / "vocoder.pth",
+        "gpt_base": pretrained / "s1v3.ckpt",
     }
     if training:
         required.update(
@@ -112,7 +118,10 @@ def check_files(project_dir: Path, *, training: bool = False) -> dict[str, str]:
                 "gpt_base": project_dir / "GPT-SoVITS" / "GPT_SoVITS" / "pretrained_models" / "s1v3.ckpt",
             }
         )
-    return {name: "通过" if path.is_file() else f"缺失：{path}" for name, path in required.items()}
+    result = {name: "通过" if path.is_file() else f"缺失：{path}" for name, path in required.items()}
+    full_lid = pretrained / "fast_langdetect" / "lid.176.bin"
+    result["language_detection_model"] = "通过（full）" if full_lid.is_file() else "通过（lite fallback）"
+    return result
 
 
 def main() -> int:
@@ -155,7 +164,7 @@ def main() -> int:
         statuses.extend(result[group].values())
     if not args.skip_files:
         statuses.extend(result["project_files"].values())
-    return 0 if all(status == "通过" for status in statuses) else 1
+    return 0 if all(status.startswith("通过") for status in statuses) else 1
 
 
 if __name__ == "__main__":

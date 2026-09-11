@@ -114,7 +114,55 @@ def load_installed_models(project_dir: str | Path) -> list[InstalledModel]:
         values = payload.get("models", [])
         if not isinstance(values, list):
             raise ModelCatalogError("installed-models.json 的 models 必须是数组")
-        return [InstalledModel.from_dict(value) for value in values]
+        models: list[InstalledModel] = []
+        changed = False
+        project_root = Path(project_dir).resolve()
+        current_model_root = project_root / "data" / "models"
+        for value in values:
+            if not isinstance(value, dict):
+                raise ModelCatalogError("模型注册项必须是对象")
+            candidate = dict(value)
+            raw_path = str(candidate.get("path", ""))
+            # 旧版本曾保存绝对路径。项目移动后，只能把确实已经随项目
+            # 移到当前 data/models/<id> 的目录安全映射回来；外部路径不自动信任。
+            if raw_path and Path(raw_path).is_absolute():
+                model_id = str(candidate.get("id", ""))
+                try:
+                    validate_model_id(model_id)
+                except ModelCatalogError:
+                    raise
+                old_name = Path(raw_path).name
+                local_candidates = []
+                for directory_name in (old_name, model_id):
+                    local_target = current_model_root / directory_name
+                    if local_target not in local_candidates:
+                        local_candidates.append(local_target)
+                matched_target = None
+                for local_target in local_candidates:
+                    try:
+                        local_metadata = json.loads(
+                            (local_target / "model.json").read_text(encoding="utf-8-sig")
+                        )
+                    except (OSError, UnicodeError, json.JSONDecodeError):
+                        continue
+                    if isinstance(local_metadata, dict) and str(local_metadata.get("id", model_id)) == model_id:
+                        matched_target = local_target
+                        break
+                if matched_target is not None:
+                    candidate["path"] = str(Path("models") / matched_target.name).replace("\\", "/")
+                    changed = True
+                else:
+                    # 外部旧路径无法证明属于当前项目，忽略该条登记，保留文件不动。
+                    changed = True
+                    continue
+            try:
+                models.append(InstalledModel.from_dict(candidate))
+            except ModelCatalogError:
+                # 旧版 characters 层级仍交给 ModelManager 的迁移逻辑处理。
+                raise
+        if changed:
+            save_installed_models(project_dir, models)
+        return models
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ModelCatalogError(f"无法读取模型注册表：{registry_path}") from exc
 

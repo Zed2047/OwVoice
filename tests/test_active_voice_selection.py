@@ -1,5 +1,5 @@
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 def test_select_voice_updates_selected_state():
@@ -65,3 +65,27 @@ def test_release_active_model_clears_loaded_state_without_stopping_backend():
     finally:
         server._active_model_key = previous_key
         server._active_voice_id = previous_active
+
+
+def test_engine_model_ready_checks_loaded_model_paths():
+    import backend.server as server
+
+    gpt_path = Path(r"D:\OwVoice\data\models\zarya\GPT_weights\model.ckpt")
+    sovits_path = Path(r"D:\OwVoice\data\models\zarya\SoVITS_weights\model.pth")
+    response = Mock(status_code=200)
+    response.json.return_value = {
+        "loaded": True,
+        "gpt_model_path": str(gpt_path).replace("\\", "/"),
+        "sovits_model_path": str(sovits_path).replace("\\", "/"),
+    }
+    with patch.object(server.requests, "get", return_value=response):
+        assert server.engine_model_ready(gpt_path, sovits_path)
+
+
+def test_engine_model_ready_rejects_unloaded_engine():
+    import backend.server as server
+
+    response = Mock(status_code=200)
+    response.json.return_value = {"loaded": False, "gpt_model_path": "", "sovits_model_path": ""}
+    with patch.object(server.requests, "get", return_value=response):
+        assert not server.engine_model_ready(Path("gpt.ckpt"), Path("sovits.pth"))

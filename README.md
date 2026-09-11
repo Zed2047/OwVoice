@@ -16,12 +16,12 @@ OwVoice 学习交流 QQ 群：1121380498，欢迎交流项目问题、改进建�
 ### 2. 使用前准备
 
 - Windows 10/11 64 位
-- 64 位 Python 3.10（从 python.org 安装）
 - 首次配置需要联网
-- CPU 模式不需要 NVIDIA 显卡；GPU 模式需要 NVIDIA 显卡和兼容的 CUDA 驱动/运行组件
-- 发布包解压、Python 虚拟环境和推理资源合计需要较大空间；建议至少预留 20GB，可选训练还会额外下载训练底模
+- CPU 模式不需要 NVIDIA 显卡；GPU 模式需要 NVIDIA 显卡和 570 或更高版本驱动
+- CPU 模式至少预留 15GB，GPU 模式至少预留 24GB；可选训练还会额外下载训练底模
+- Microsoft Visual C++ 2015-2022 x64 运行库（多数 Windows 10/11 已自带；缺失时安装器会给出官方地址）
 
-首次配置会在项目目录创建 `.venv`，按选择安装固定版本的 CPU 或 GPU 依赖，再下载 GPT-SoVITS 推理资源和 NLTK 资源。
+无需安装 Python、C/C++、CMake 或 Visual Studio。发布包内置经过校验的 `uv`，会把固定版本 Python 和完整锁定的依赖安装到项目目录，不修改系统 Python、PATH 或注册表；随后下载并校验 GPT-SoVITS 与 NLTK 资源。
 
 ### 3. 首次配置
 
@@ -44,13 +44,15 @@ OwVoice 学习交流 QQ 群：1121380498，欢迎交流项目问题、改进建�
 7. 点击“检查更新”可更新程序和 GPT-SoVITS 代码；配置、模型、输出文件和缓存会保留。
 8. 合成完成后可以播放、打开文件或删除 WAV 文件。
 
+> v0.1.2 升级到 v0.2.0：请下载 `UpdateBridge-v0.2.0.zip`，把压缩包内容解压到原 OwVoice 目录并允许覆盖，然后双击 `修复更新器.bat`。这是旧版用户唯一需要执行的一次手动桥接；从 v0.2.0 开始可继续使用程序内自动更新。
+
 > 提示：首次启动通常需要约 15 秒加载语音引擎，请耐心等待。
 
 ## 常见问题
 
 ### 首次配置提示找不到运行环境
 
-确认已安装 64 位 Python 3.10，并重新打开 `setup.bat`。若配置失败，可先运行 `powershell -ExecutionPolicy Bypass -File .\scripts\check_env.ps1`，再把 `environment-report.txt` 和完整报错发送给 AI。
+不需要自行安装 Python。请确认下载的是完整 Release ZIP、已完整解压并且目录可写，然后重新运行 `setup.bat`。安装可以断点续传并复用已完成步骤。若仍失败，请把 `logs` 目录中最新的 `setup-*.log` 和 `environment-report.txt` 发给维护者；不要发送密码或令牌。
 
 排查时应同时说明选择的是 CPU 还是 GPU。AI 只应根据环境报告和完整报错给出检查建议；不要发送密码、令牌等敏感信息，也不要直接执行来源不明的命令。
 
@@ -65,6 +67,12 @@ GPU 模式请确认 NVIDIA 驱动和 `nvidia-smi` 正常；没有 NVIDIA 显卡�
 - `logs\gpt_sovits.error.log`
 - `logs\backend.error.log`
 - `logs\warmup.error.log`
+
+### 解压后出现旧角色模型，或导入提示“目标模型目录已存在但尚未登记”
+
+这通常是旧发布包或旧测试目录残留了模型注册表。请使用最新 Release ZIP 解压到一个新的空目录；新包不包含角色模型，注册表也会从空文件开始。已有完整模型目录可通过“导入模型”选择整个 `data\models` 进行原地登记，旧的绝对路径会迁移为当前目录下的相对路径。
+
+如果提示端口被另一套 OwVoice 占用，请先关闭其他安装目录中的 OwVoice，再启动当前目录的程序。
 
 ### 启动很慢
 
@@ -100,7 +108,7 @@ GPU 模式请确认 NVIDIA 驱动和 `nvidia-smi` 正常；没有 NVIDIA 显卡�
 
 - `OwVoice.exe` 和运行文件
 - `setup.bat` 首次配置脚本
-- 固定版本 CPU/GPU 依赖清单；用户环境安装在项目目录的 `.venv`
+- 内置签名版 `uv`、项目私有 Python 安装能力和完整依赖锁；CPU/GPU 环境分别安装并按选择切换
 - 本地模型库目录（初始为空，模型和参考音频需由用户自行准备或导入）
 - 本地模型库、本地训练入口和程序更新功能（训练依赖与训练底模按需安装）
 - GPT-SoVITS 推理代码
@@ -111,14 +119,17 @@ GPU 模式请确认 NVIDIA 驱动和 `nvidia-smi` 正常；没有 NVIDIA 显卡�
 ## 开发者构建
 
 ```powershell
-.\scripts\setup.ps1
+.\scripts\setup_v2.ps1
 .\scripts\run.ps1
 uv sync --extra cpu  # 或 uv sync --extra gpu，用于开发环境
 .\scripts\build_exe.ps1
 .\scripts\build_release.ps1
+.\scripts\build_update_bridge.ps1
 ```
 
-开发环境依赖由 `requirements-cpu.txt`、`requirements-gpu.txt`、`requirements-training.txt`、`pyproject.toml` 和 `uv.lock` 固定。CPU/GPU 清单是实际安装入口，`pyproject.toml` 与 `uv.lock` 供 uv 开发环境使用；先构建 EXE，再按需生成发布包。暂不生成 ZIP 进行日常测试。
+开发与发布环境以 `pyproject.toml` 和 `uv.lock` 为唯一可复现安装入口；`requirements-*.txt` 保留作人工查阅。先构建 EXE，再按需生成发布包。暂不生成 ZIP 进行日常测试。
+
+发布 v0.2.0 时需要同时上传 `OwVoice-v0.2.0.zip`、`release-manifest-v2-v0.2.0.json` 和 `UpdateBridge-v0.2.0.zip`。不要上传旧格式的 `release-manifest-v0.2.0.json`，否则 v0.1.2 的旧更新器可能执行不安全的整目录替换。
 
 模型包格式和导入规则见 `MODEL_PACKAGE_SPEC.md`；第三方许可证见 `THIRD_PARTY_NOTICES.md`。
 

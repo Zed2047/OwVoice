@@ -30,9 +30,9 @@ if not CONFIG_PATH.is_absolute():
     CONFIG_PATH = PROJECT_DIR / CONFIG_PATH
 GSV_API = os.environ.get("OWVOICE_GSV_API", "http://127.0.0.1:9880").rstrip("/")
 MODEL_MANAGER = ModelManager(PROJECT_DIR, os.environ.get("OWVOICE_MODEL_INDEX_URL"))
-UPDATE_MANAGER = UpdateManager(os.environ.get("OWVOICE_APP_VERSION", "0.1.2"))
+UPDATE_MANAGER = UpdateManager(os.environ.get("OWVOICE_APP_VERSION", "0.2.0"))
 
-app = FastAPI(title="OwVoice API", version="0.1.2")
+app = FastAPI(title="OwVoice API", version="0.2.0")
 _model_lock = threading.Lock()
 _synthesis_lock = threading.Lock()
 _active_model_key: str | None = None
@@ -199,10 +199,41 @@ def initialize_active_voice_from_environment() -> None:
 
 def engine_online() -> bool:
     try:
-        response = requests.get(f"{GSV_API}/control", timeout=2)
+        # 9880 未启动时无需阻塞整个 /api/health；健康接口本身仍应快速返回。
+        response = requests.get(f"{GSV_API}/control", timeout=0.5)
         return response.status_code in (200, 404, 405)
     except requests.RequestException:
         return False
+
+
+def _same_path(left: object, right: object) -> bool:
+    """比较 Windows 路径，避免大小写或斜杠差异造成误判。"""
+    if not left or not right:
+        return False
+    try:
+        left_path = os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(left))))
+        right_path = os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(right))))
+    except (TypeError, ValueError, OSError):
+        return False
+    return left_path == right_path
+
+
+def engine_model_ready(gpt_path: Path, sovits_path: Path) -> bool:
+    """确认 GPT-SoVITS 进程中确实加载了当前这组权重。"""
+    try:
+        response = requests.get(f"{GSV_API}/model_status", timeout=3)
+    except requests.RequestException:
+        return False
+    if response.status_code != 200:
+        # 旧版引擎没有该接口时按未确认处理，后续会重新发送 set_model。
+        return False
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    return bool(payload.get("loaded")) and _same_path(payload.get("gpt_model_path"), gpt_path) and _same_path(
+        payload.get("sovits_model_path"), sovits_path
+    )
 
 
 initialize_active_voice_from_environment()
@@ -225,7 +256,7 @@ def activate_voice(voice: dict[str, Any]) -> None:
     if model_key is None:
         raise HTTPException(status_code=422, detail="角色模型路径无效")
     with _model_lock:
-        if model_key == _active_model_key:
+        if model_key == _active_model_key and engine_model_ready(gpt_path, sovits_path):
             _active_voice_id = voice["id"]
             _selected_voice_id = voice["id"]
             return
@@ -335,6 +366,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "owvoice": True,
+        "project_dir": str(PROJECT_DIR),
         "gpt_sovits_online": engine_online(),
         "gpt_sovits_api": GSV_API,
         "active_voice_id": _active_voice_id,
@@ -447,7 +479,10 @@ def activate(voice_id: str) -> dict[str, str]:
     if not engine_online():
         raise HTTPException(status_code=503, detail="GPT-SoVITS 引擎未在线")
     voice = find_voice(voice_id)
-    activate_voice(voice)
+    # 角色切换不能与推理或卸载并发，否则 GPT-SoVITS 可能在 speaker_list
+    # 被清空的窗口收到请求，表现为 KeyError: 'default'。
+    with _synthesis_lock:
+        activate_voice(voice)
     return {"voice_id": voice_id, "status": "active"}
 
 
@@ -530,13 +565,14 @@ def import_local_model(request: LocalModelImportRequest) -> dict[str, Any]:
         result = MODEL_MANAGER.import_models(request.source_dir)
     except ModelManagerError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if not result["imported"]:
+    if not result["imported"] and not result["skipped"]:
         details = "\n".join(f"{item['source']}：{item['error']}" for item in result["failed"])
         raise HTTPException(status_code=400, detail=f"没有成功导入任何模型。\n{details}")
     return {
         "status": "imported",
         "model": result["imported"][0] if len(result["imported"]) == 1 else None,
         "models": result["imported"],
+        "skipped": result["skipped"],
         "failed": result["failed"],
     }
 

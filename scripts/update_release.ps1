@@ -3,7 +3,8 @@
     [Parameter(Mandatory=$true)][string]$Sha256,
     [Parameter(Mandatory=$true)][string]$TargetDirectory,
     [int]$WaitPid = 0,
-    [string]$RestartPath = ""
+    [string]$RestartPath = "",
+    [switch]$NoRestart
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,7 +21,24 @@ New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
 $archivePath = Join-Path $downloadDir ([System.IO.Path]::GetFileName(([uri]$DownloadUrl).AbsolutePath))
 if ([string]::IsNullOrWhiteSpace([System.IO.Path]::GetFileName($archivePath))) { throw "更新包文件名无效。" }
 
-Invoke-WebRequest -Uri $DownloadUrl -OutFile $archivePath
+function Download-WithRetry([string]$url, [string]$target) {
+    $partial = "$target.part"
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $partial -TimeoutSec 300
+            Move-Item -LiteralPath $partial -Destination $target -Force
+            return
+        } catch {
+            $lastError = $_.Exception
+            Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+            if ($attempt -lt 3) { Start-Sleep -Seconds ([math]::Min([math]::Pow(2, $attempt - 1), 8)) }
+        }
+    }
+    throw "更新包下载失败：$lastError"
+}
+
+Download-WithRetry $DownloadUrl $archivePath
 $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actualHash -ne $Sha256.Trim().ToLowerInvariant()) { throw "更新包 SHA256 校验失败，已停止更新。" }
 
@@ -31,19 +49,67 @@ Expand-Archive -LiteralPath $archivePath -DestinationPath $extractDir
 $packageRoot = Get-ChildItem -LiteralPath $extractDir -Directory | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "OwVoice.exe") } | Select-Object -First 1
 if ($null -eq $packageRoot) { throw "更新包中找不到 OwVoice.exe。" }
 
-$items = @("backend", "frontend", "assets", "GPT-SoVITS", "scripts", "_internal", "OwVoice.exe")
+$items = @(
+    "backend", "frontend", "assets", "GPT-SoVITS", "scripts", "tools", "_internal", "OwVoice.exe",
+    "requirements-cpu.txt", "requirements-gpu.txt", "requirements-training.txt", "setup.bat",
+    "pyproject.toml", "uv.lock", "README.md", "CHANGELOG.md", "MODEL_PACKAGE_SPEC.md", "LICENSE", "THIRD_PARTY_NOTICES.md"
+)
+$overlayItems = @("assets", "GPT-SoVITS")
+$overlayExclusions = @(
+    "assets\avatars",
+    "GPT-SoVITS\GPT_SoVITS\pretrained_models",
+    "GPT-SoVITS\GPT_SoVITS\text\G2PWModel",
+    "GPT-SoVITS\tools\uvr5\uvr5_weights",
+    "GPT-SoVITS\ffmpeg.exe",
+    "GPT-SoVITS\ffprobe.exe",
+    "GPT-SoVITS\weight.json"
+)
+function Is-ExcludedOverlayPath([string]$relativePath) {
+    foreach ($excluded in $overlayExclusions) {
+        if ($relativePath -eq $excluded -or $relativePath.StartsWith($excluded + "\", [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+function Copy-DirectoryOverlay([string]$sourceDirectory, [string]$targetDirectory, [string]$relativeRoot) {
+    if (-not (Test-Path -LiteralPath $sourceDirectory -PathType Container)) { return }
+    New-Item -ItemType Directory -Force -Path $targetDirectory | Out-Null
+    foreach ($sourceItem in Get-ChildItem -LiteralPath $sourceDirectory -Force) {
+        $relativePath = Join-Path $relativeRoot $sourceItem.Name
+        if (Is-ExcludedOverlayPath $relativePath) { continue }
+        $targetItem = Join-Path $targetDirectory $sourceItem.Name
+        if ($sourceItem.PSIsContainer) {
+            Copy-DirectoryOverlay $sourceItem.FullName $targetItem $relativePath
+        } else {
+            Copy-Item -LiteralPath $sourceItem.FullName -Destination $targetItem -Force
+        }
+    }
+}
 New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
+$backedUpItems = @()
+$installedItems = @()
 try {
     foreach ($item in $items) {
+        if ($overlayItems -contains $item) { continue }
         $oldPath = Join-Path $targetDir $item
         if (Test-Path -LiteralPath $oldPath) {
-            Move-Item -LiteralPath $oldPath -Destination (Join-Path $backupDir $item)
+            Move-Item -LiteralPath $oldPath -Destination (Join-Path $backupDir $item) -Force
+            $backedUpItems += $item
         }
     }
     foreach ($item in $items) {
+        if ($overlayItems -contains $item) { continue }
         $newPath = Join-Path $packageRoot.FullName $item
         if (-not (Test-Path -LiteralPath $newPath)) { throw "更新包缺少：$item" }
-        Move-Item -LiteralPath $newPath -Destination (Join-Path $targetDir $item)
+        Move-Item -LiteralPath $newPath -Destination (Join-Path $targetDir $item) -Force
+        $installedItems += $item
+    }
+    foreach ($item in $overlayItems) {
+        $newPath = Join-Path $packageRoot.FullName $item
+        if (-not (Test-Path -LiteralPath $newPath -PathType Container)) { throw "更新包缺少：$item" }
+        $oldPath = Join-Path $targetDir $item
+        $overlayBackupPath = Join-Path $backupDir (Join-Path "overlay" $item)
+        Copy-DirectoryOverlay $oldPath $overlayBackupPath $item
+        Copy-DirectoryOverlay $newPath $oldPath $item
     }
     $exampleConfig = Join-Path $packageRoot.FullName "config\voices.example.json"
     if (Test-Path -LiteralPath $exampleConfig) {
@@ -51,11 +117,18 @@ try {
     }
     Remove-Item -LiteralPath $backupDir -Recurse -Force
 } catch {
-    foreach ($item in $items) {
+    foreach ($item in $installedItems) {
         $newPath = Join-Path $targetDir $item
+        if (Test-Path -LiteralPath $newPath) { Remove-Item -LiteralPath $newPath -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    foreach ($item in $backedUpItems) {
         $oldPath = Join-Path $backupDir $item
-        if (Test-Path -LiteralPath $newPath) { Remove-Item -LiteralPath $newPath -Recurse -Force }
-        if (Test-Path -LiteralPath $oldPath) { Move-Item -LiteralPath $oldPath -Destination (Join-Path $targetDir $item) }
+        if (Test-Path -LiteralPath $oldPath) { Move-Item -LiteralPath $oldPath -Destination (Join-Path $targetDir $item) -Force }
+    }
+    foreach ($item in $overlayItems) {
+        $overlayBackupPath = Join-Path $backupDir (Join-Path "overlay" $item)
+        $targetPath = Join-Path $targetDir $item
+        Copy-DirectoryOverlay $overlayBackupPath $targetPath $item
     }
     throw
 } finally {
@@ -64,6 +137,8 @@ try {
     if (Test-Path -LiteralPath $backupDir) { Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
-if ([string]::IsNullOrWhiteSpace($RestartPath)) { $RestartPath = Join-Path $targetDir "OwVoice.exe" }
-Start-Process -FilePath ([System.IO.Path]::GetFullPath($RestartPath)) -WorkingDirectory $targetDir
+if (-not $NoRestart) {
+    if ([string]::IsNullOrWhiteSpace($RestartPath)) { $RestartPath = Join-Path $targetDir "OwVoice.exe" }
+    Start-Process -FilePath ([System.IO.Path]::GetFullPath($RestartPath)) -WorkingDirectory $targetDir
+}
 Write-Host "OwVoice 更新完成。"
