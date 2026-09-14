@@ -6,6 +6,10 @@
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$compatibilityScript = Join-Path $PSScriptRoot "verify_text_compatibility.ps1"
+$windowsPowerShell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+& $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $compatibilityScript -ProjectRoot $projectRoot
+if ($LASTEXITCODE -ne 0) { throw "文本兼容性检查失败，已停止更新器构建。" }
 . (Join-Path $PSScriptRoot "release_common.ps1")
 $releaseIdentity = Get-OwVoiceReleaseIdentity -ProjectRoot $projectRoot -ValidateMirrors
 $Version = Resolve-OwVoiceReleaseTag -Identity $releaseIdentity -RequestedVersion $Version

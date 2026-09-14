@@ -12,6 +12,8 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
+from backend.text_encoding import read_text_compat
+
 
 MODEL_ID_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
 REGISTRY_RELATIVE_PATH = Path("models") / "installed-models.json"
@@ -108,7 +110,7 @@ def load_installed_models(project_dir: str | Path) -> list[InstalledModel]:
         return []
     try:
         # Windows PowerShell 5 的 UTF-8 文件可能带 BOM，需兼容读取。
-        payload = json.loads(registry_path.read_text(encoding="utf-8-sig"))
+        payload = json.loads(read_text_compat(registry_path))
         if not isinstance(payload, dict):
             raise ModelCatalogError("installed-models.json 顶层必须是对象")
         values = payload.get("models", [])
@@ -141,7 +143,7 @@ def load_installed_models(project_dir: str | Path) -> list[InstalledModel]:
                 for local_target in local_candidates:
                     try:
                         local_metadata = json.loads(
-                            (local_target / "model.json").read_text(encoding="utf-8-sig")
+                            read_text_compat(local_target / "model.json")
                         )
                     except (OSError, UnicodeError, json.JSONDecodeError):
                         continue

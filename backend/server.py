@@ -21,6 +21,7 @@ from backend.model_catalog import ModelCatalogError, get_character_root, load_in
 from backend.model_manager import ModelManager, ModelManagerError
 from backend.training_errors import TrainingError
 from backend.update_manager import UpdateManager, UpdateManagerError
+from backend.text_encoding import read_text_compat
 
 
 PROJECT_DIR = Path(os.environ.get("OWVOICE_PROJECT_DIR", Path(__file__).resolve().parents[1]))
@@ -119,7 +120,7 @@ def load_voices() -> list[dict[str, Any]]:
             continue
         metadata_path = model_root / "model.json"
         try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+            metadata = json.loads(read_text_compat(metadata_path))
         except (OSError, UnicodeError, json.JSONDecodeError):
             continue
         if not isinstance(metadata, dict) or str(metadata.get("id", installed.id)) != installed.id:

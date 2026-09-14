@@ -1048,6 +1048,8 @@ class TrainingManager:
                     stale_path.unlink(missing_ok=True)
             python = str(self.python_exe)
             env = os.environ.copy()
+            env["PYTHONUTF8"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
             env["PYTHONPATH"] = os.pathsep.join(
                 str(path)
                 for path in (self.gsv_root, self.gsv_root / "GPT_SoVITS", self.gsv_root / "tools")

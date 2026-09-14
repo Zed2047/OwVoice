@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 $projectDir = Split-Path -Parent $PSScriptRoot
 
 # The project-local GPT-SoVITS directory is used by default.

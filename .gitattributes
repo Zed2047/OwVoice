@@ -1,0 +1,21 @@
+* text=auto
+
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.py text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+
+*.exe binary
+*.dll binary
+*.pyd binary
+*.zip binary
+*.onnx binary
+*.pth binary
+*.pt binary
+*.ckpt binary
+*.wav binary

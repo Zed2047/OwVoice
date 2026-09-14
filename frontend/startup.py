@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from frontend.app import ICON_PATH, OwVoiceApp, set_windows_app_identity
+from backend.text_encoding import read_text_tail
 
 
 class StartupError(RuntimeError):
@@ -129,12 +130,7 @@ def resolve_project_path(project_dir: Path, value: str | None) -> Path | None:
 
 
 def tail_file(path: Path, limit: int = 1800) -> str:
-    if not path.exists():
-        return ""
-    try:
-        return path.read_text(encoding="utf-8", errors="replace")[-limit:].strip()
-    except OSError:
-        return ""
+    return read_text_tail(path, limit)
 
 
 class StartupWorker(QObject):
@@ -199,6 +195,8 @@ class StartupWorker(QObject):
             # EXE 使用无控制台模式时，子进程仍可能单独弹出控制台窗口。
             creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
         environment = dict(env or os.environ)
+        environment["PYTHONUTF8"] = "1"
+        environment["PYTHONIOENCODING"] = "utf-8"
         nltk_data_dir = self.resolve_nltk_data_dir()
         if nltk_data_dir is not None:
             environment["NLTK_DATA"] = str(nltk_data_dir)

@@ -1,4 +1,4 @@
-$script:OwVoiceSemVerPattern = '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$'
+﻿$script:OwVoiceSemVerPattern = '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$'
 
 function Get-OwVoiceReleaseIdentity {
     param(

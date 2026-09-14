@@ -20,6 +20,7 @@ from backend.model_catalog import (
     save_installed_models,
     validate_model_id,
 )
+from backend.text_encoding import read_text_compat
 
 
 class ModelManagerError(RuntimeError):
@@ -132,7 +133,7 @@ class ModelManager:
                 "source": "local",
             }
             try:
-                metadata = json.loads((root / "model.json").read_text(encoding="utf-8-sig"))
+                metadata = json.loads(read_text_compat(root / "model.json"))
             except (OSError, UnicodeError, json.JSONDecodeError):
                 metadata = {}
             if isinstance(metadata, dict):
@@ -155,7 +156,7 @@ class ModelManager:
                 raise ModelManagerError("不能把模型文件直接放在 data\\models 根目录，请选择单个模型目录或模型集合目录")
             raise ModelManagerError("请选择包含 model.json 的单个模型目录")
         try:
-            metadata = json.loads((source / "model.json").read_text(encoding="utf-8-sig"))
+            metadata = json.loads(read_text_compat(source / "model.json"))
             if not isinstance(metadata, dict):
                 raise ModelManagerError("model.json 顶层必须是对象")
             model_id = str(metadata.get("id", "")).strip()
@@ -336,7 +337,7 @@ class ModelManager:
             raise ModelManagerError("模型目录不存在或不在本地模型目录内")
         metadata_path = root / "model.json"
         try:
-            original_metadata_text = metadata_path.read_text(encoding="utf-8-sig")
+            original_metadata_text = read_text_compat(metadata_path)
             metadata = json.loads(original_metadata_text)
         except (OSError, json.JSONDecodeError) as exc:
             raise ModelManagerError(f"模型配置文件无法读取：{metadata_path}") from exc

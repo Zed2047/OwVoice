@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from backend.app_version import get_app_version
+from backend.text_encoding import read_text_tail
 
 
 API_URL = os.environ.get("OWVOICE_API", "http://127.0.0.1:8765").rstrip("/")
@@ -536,6 +537,8 @@ class EngineStartWorker(QObject):
             stdout_path = logs_dir / "gpt_sovits.log"
             stderr_path = logs_dir / "gpt_sovits.error.log"
             environment = os.environ.copy()
+            environment["PYTHONUTF8"] = "1"
+            environment["PYTHONIOENCODING"] = "utf-8"
             nltk_candidates = (
                 self.project_dir / "data" / "nltk_data",
                 self.project_dir / ".venv" / "nltk_data",
@@ -575,7 +578,7 @@ class EngineStartWorker(QObject):
                 if self.process is not None and self.process.poll() is not None:
                     detail = "GPT-SoVITS 启动后立即退出。"
                     try:
-                        log = stderr_path.read_text(encoding="utf-8", errors="replace")[-1800:].strip()
+                        log = read_text_tail(stderr_path)
                     except OSError:
                         log = ""
                     if log:
