@@ -10,6 +10,9 @@ $OutputEncoding = $utf8
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 $projectDir = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "release_common.ps1")
+$releaseIdentity = Get-OwVoiceReleaseIdentity -ProjectRoot $projectDir
+$appVersion = $releaseIdentity.tag
 Set-Location $projectDir
 $venvDir = Join-Path $projectDir ".venv"
 $pythonExe = Join-Path $venvDir "Scripts\python.exe"
@@ -66,7 +69,7 @@ function Select-InstallMode {
 
 function Assert-Preflight([string]$installMode) {
     Write-Step "安装前检查"
-    if (-not [Environment]::Is64BitOperatingSystem) { throw "OwVoice v0.2.0 仅支持 64 位 Windows。" }
+    if (-not [Environment]::Is64BitOperatingSystem) { throw "OwVoice $appVersion 仅支持 64 位 Windows。" }
     if ($projectDir.Length -gt 180) { throw "安装路径过长（$($projectDir.Length) 个字符）。请解压到较短路径，例如 D:\OwVoice。" }
     if ($projectDir.Length -gt 120) { Write-Host "警告：当前路径较长，建议移动到 D:\OwVoice。" -ForegroundColor Yellow }
     if ($projectDir -match "(?i)\\Program Files( \(x86\))?\\") { throw "请勿放在 Program Files 中安装；请移动到 D:\OwVoice 等有写权限的目录。" }
@@ -158,7 +161,7 @@ function Sync-Dependencies([string]$installMode) {
 
 function Invoke-Setup {
     $installMode = Select-InstallMode
-    Write-Host "OwVoice v0.2.0 首次配置/环境修复" -ForegroundColor Green
+    Write-Host "OwVoice $appVersion 首次配置/环境修复" -ForegroundColor Green
     Write-Host "项目目录：$projectDir"
     Write-Host "安装模式：$installMode"
     Assert-Preflight $installMode

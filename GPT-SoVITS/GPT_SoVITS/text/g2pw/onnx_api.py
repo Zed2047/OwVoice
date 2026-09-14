@@ -2,9 +2,12 @@
 # This code is modified from https://github.com/GitYCC/g2pW
 
 import json
+import hashlib
 import os
+import stat
 import warnings
 import zipfile
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -79,17 +82,59 @@ def download_and_decompress(model_dir: str = "G2PWModel/"):
         extract_dir = os.path.join(parent_directory, "G2PWModel_1.1")
         extract_dir_new = os.path.join(parent_directory, "G2PWModel")
         print("Downloading g2pw model...")
-        modelscope_url = "https://www.modelscope.cn/models/kamiorinn/g2pw/resolve/master/G2PWModel_1.1.zip"
-        with requests.get(modelscope_url, stream=True) as r:
+        lock_candidates = [Path.cwd() / "resource-lock.json", Path(__file__).resolve().parents[4] / "resource-lock.json"]
+        lock_path = next((path for path in lock_candidates if path.is_file()), None)
+        if lock_path is None:
+            raise RuntimeError("缺少 resource-lock.json，拒绝从未固定地址下载 G2PW。请先运行 setup.bat。")
+        try:
+            g2pw_info = json.loads(lock_path.read_text(encoding="utf-8"))["g2pw"]
+            modelscope_url = g2pw_info["url"]
+            expected_size = int(g2pw_info["size_bytes"])
+            expected_sha256 = str(g2pw_info["sha256"]).lower()
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"G2PW 资源锁无效：{lock_path}") from exc
+        partial_path = zip_dir + ".part"
+        with requests.get(modelscope_url, stream=True, timeout=(15, 120)) as r:
             r.raise_for_status()
-            with open(zip_dir, "wb") as f:
+            with open(partial_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
+        if os.path.getsize(partial_path) != expected_size:
+            os.unlink(partial_path)
+            raise RuntimeError("G2PW 下载大小校验失败")
+        digest = hashlib.sha256()
+        with open(partial_path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest().lower() != expected_sha256:
+            os.unlink(partial_path)
+            raise RuntimeError("G2PW 下载 SHA256 校验失败")
+        os.replace(partial_path, zip_dir)
 
         print("Extracting g2pw model...")
+        destination = Path(parent_directory).resolve()
         with zipfile.ZipFile(zip_dir, "r") as zip_ref:
-            zip_ref.extractall(parent_directory)
+            for info in zip_ref.infolist():
+                mode = (info.external_attr >> 16) & 0xFFFF
+                if mode and stat.S_ISLNK(mode):
+                    raise RuntimeError(f"G2PW 压缩包包含不安全链接：{info.filename}")
+                output = (destination / info.filename).resolve()
+                try:
+                    output.relative_to(destination)
+                except ValueError as exc:
+                    raise RuntimeError(f"G2PW 压缩包包含不安全路径：{info.filename}") from exc
+            zip_ref.extractall(destination)
+
+        model_file = os.path.join(extract_dir, "g2pW.onnx")
+        if not os.path.isfile(model_file) or os.path.getsize(model_file) != 635212732:
+            raise RuntimeError("G2PW g2pW.onnx 大小校验失败")
+        digest = hashlib.sha256()
+        with open(model_file, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest().lower() != "2eb3c71fd95117b2e1abef8d2d0cd78aae894bbe7f0fac105ddc9c32ce63cbd0":
+            raise RuntimeError("G2PW g2pW.onnx SHA256 校验失败")
 
         os.rename(extract_dir, extract_dir_new)
 

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import json
 import os
+import stat
 import sys
 import shutil
 import time
@@ -19,21 +21,15 @@ import nltk
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("OWVOICE_NLTK_DATA", str(PROJECT_DIR / "data" / "nltk_data")))
-PACKAGES = {
+RESOURCE_LOCK_PATH = PROJECT_DIR / "resource-lock.json"
+try:
+    RESOURCE_LOCK = json.loads(RESOURCE_LOCK_PATH.read_text(encoding="utf-8"))
+    if RESOURCE_LOCK.get("schema") != 1:
+        raise ValueError("unsupported schema")
     # g2p_en 2.1.0 仍会检查旧包；新版 NLTK 的 pos_tag 则需要 _eng 包。
-    "averaged_perceptron_tagger": {
-        "url": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/taggers/averaged_perceptron_tagger.zip",
-        "sha256": "e1f13cf2532daadfd6f3bc481a49859f0b8ea6432ccdcd83e6a49a5f19008de9",
-    },
-    "averaged_perceptron_tagger_eng": {
-        "url": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/taggers/averaged_perceptron_tagger_eng.zip",
-        "sha256": "6025f530624335c67d6547d44757b357b4e79bae030a0383e9887a92c1718f0b",
-    },
-    "cmudict": {
-        "url": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/corpora/cmudict.zip",
-        "sha256": "d07cca47fd72ad32ea9d8ad1219f85301eeaf4568f8b6b73747506a71fb5afd6",
-    },
-}
+    PACKAGES = RESOURCE_LOCK["nltk"]
+except (OSError, ValueError, json.JSONDecodeError, KeyError) as exc:
+    raise RuntimeError(f"资源锁文件无效：{RESOURCE_LOCK_PATH}") from exc
 RESOURCE_PATHS = (
     DATA_DIR / "taggers" / "averaged_perceptron_tagger",
     DATA_DIR / "taggers" / "averaged_perceptron_tagger_eng",
@@ -66,6 +62,22 @@ def download_package(url: str, target: Path, expected_sha256: str) -> None:
     raise RuntimeError(f"下载 NLTK 数据失败：{url}\n{last_error}") from last_error
 
 
+def safe_extract_all(archive: zipfile.ZipFile, destination: Path) -> None:
+    """拒绝绝对路径、目录穿越和符号链接，避免下载包写出目标目录。"""
+
+    root = destination.resolve()
+    for info in archive.infolist():
+        mode = (info.external_attr >> 16) & 0xFFFF
+        if mode and stat.S_ISLNK(mode):
+            raise RuntimeError(f"NLTK 压缩包包含不安全链接：{info.filename}")
+        output = (destination / info.filename).resolve()
+        try:
+            output.relative_to(root)
+        except ValueError as exc:
+            raise RuntimeError(f"NLTK 压缩包包含不安全路径：{info.filename}") from exc
+    archive.extractall(destination)
+
+
 def main() -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     nltk.data.path.insert(0, str(DATA_DIR))
@@ -87,7 +99,7 @@ def main() -> int:
             with tempfile.TemporaryDirectory(prefix="owvoice-nltk-", dir=zip_path.parent) as temporary:
                 temporary_path = Path(temporary)
                 with zipfile.ZipFile(zip_path) as archive:
-                    archive.extractall(temporary_path)
+                    safe_extract_all(archive, temporary_path)
                 extracted = temporary_path / package
                 if not extracted.is_dir():
                     raise RuntimeError(f"NLTK 压缩包目录结构无效：{package}")

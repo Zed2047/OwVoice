@@ -7,6 +7,8 @@ from typing import Any
 
 import requests
 
+from backend.app_version import get_app_version
+
 
 class UpdateManagerError(RuntimeError):
     """更新清单获取或解析失败。"""
@@ -17,8 +19,8 @@ class UpdateManager:
 
     VERSION_PATTERN = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+].*)?$")
 
-    def __init__(self, current_version: str = "0.2.0", repository: str = "Zed2047/OwVoice"):
-        self.current_version = current_version.lstrip("v")
+    def __init__(self, current_version: str | None = None, repository: str = "Zed2047/OwVoice"):
+        self.current_version = (current_version or get_app_version()).lstrip("v")
         self.release_api = f"https://api.github.com/repos/{repository}/releases/latest"
 
     @classmethod
@@ -77,9 +79,12 @@ class UpdateManager:
                 if (
                     isinstance(manifest, dict)
                     and manifest.get("schema") == 2
+                    and manifest.get("version") == tag
                     and manifest.get("archive_name") == f"OwVoice-{tag}.zip"
+                    and manifest.get("size_bytes") == app_asset.get("size")
+                    and re.fullmatch(r"[0-9a-fA-F]{64}", str(manifest.get("sha256", "")))
                 ):
-                    result["app"]["sha256"] = str(manifest.get("sha256", "")).lower() or None
+                    result["app"]["sha256"] = str(manifest["sha256"]).lower()
             except (requests.RequestException, ValueError):
                 result["app"]["sha256"] = None
 

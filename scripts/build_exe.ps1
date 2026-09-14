@@ -5,6 +5,8 @@
 $ErrorActionPreference = "Stop"
 $env:PYTHONNOUSERSITE = "1"
 $projectDir = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "release_common.ps1")
+$releaseIdentity = Get-OwVoiceReleaseIdentity -ProjectRoot $projectDir -ValidateMirrors
 $env:PYTHONUSERBASE = Join-Path $projectDir ".pyinstaller-user"
 Set-Location $projectDir
 
@@ -43,6 +45,7 @@ $pyinstallerArgs = @(
     "--hidden-import", "frontend.startup",
     # startup.py 在运行时动态导入 backend.server，必须显式告知 PyInstaller。
     "--hidden-import", "backend.server",
+    "--hidden-import", "backend.app_version",
     "--hidden-import", "backend.model_catalog",
     "--hidden-import", "backend.model_manager",
     "--hidden-import", "backend.training_errors",
@@ -78,6 +81,7 @@ $exePath = Join-Path $distPath "OwVoice\OwVoice.exe"
 if (-not (Test-Path -LiteralPath $exePath)) {
     throw "OwVoice.exe was not generated: $exePath"
 }
+Copy-Item -LiteralPath (Join-Path $projectDir "version.json") -Destination (Split-Path -Parent $exePath) -Force
 
 Write-Host "OwVoice.exe build complete: $exePath" -ForegroundColor Green
 
@@ -96,11 +100,60 @@ if ($running.Count -gt 0) {
 
 $builtInternalPath = Join-Path (Split-Path -Parent $exePath) "_internal"
 $rootInternalPath = Join-Path $projectDir "_internal"
-Copy-Item -LiteralPath $exePath -Destination $rootExePath -Force
-if (Test-Path -LiteralPath $builtInternalPath) {
-    if (-not (Test-Path -LiteralPath $rootInternalPath)) {
-        New-Item -ItemType Directory -Path $rootInternalPath | Out-Null
+$syncRoot = Join-Path $projectDir (".cache\build-exe-sync\" + [Guid]::NewGuid().ToString("N"))
+$incomingInternalPath = Join-Path $syncRoot "_internal"
+$backupInternalPath = Join-Path $syncRoot "_internal-backup"
+$backupExePath = Join-Path $syncRoot "OwVoice.exe.backup"
+New-Item -ItemType Directory -Force -Path $syncRoot | Out-Null
+$rootInternalMoved = $false
+$rootExeMoved = $false
+try {
+    if (-not (Test-Path -LiteralPath $builtInternalPath -PathType Container)) {
+        throw "PyInstaller 未生成 _internal：$builtInternalPath"
     }
-    Get-ChildItem -LiteralPath $builtInternalPath -Force | Copy-Item -Destination $rootInternalPath -Recurse -Force
+    # 先复制到独立 incoming 目录，避免根目录出现半棵运行库树。
+    Copy-Item -LiteralPath $builtInternalPath -Destination $incomingInternalPath -Recurse -Force
+    if (Test-Path -LiteralPath $rootInternalPath) {
+        Move-Item -LiteralPath $rootInternalPath -Destination $backupInternalPath -Force
+        $rootInternalMoved = $true
+    }
+    if (Test-Path -LiteralPath $rootExePath) {
+        Move-Item -LiteralPath $rootExePath -Destination $backupExePath -Force
+        $rootExeMoved = $true
+    }
+    Move-Item -LiteralPath $incomingInternalPath -Destination $rootInternalPath -Force
+    Copy-Item -LiteralPath $exePath -Destination $rootExePath -Force
+
+    $builtExeHash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $rootExeHash = (Get-FileHash -LiteralPath $rootExePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($builtExeHash -ne $rootExeHash) { throw "根目录 EXE 与构建产物 SHA256 不一致。" }
+    $builtFiles = @(Get-ChildItem -LiteralPath $builtInternalPath -Recurse -File -Force)
+    $rootFiles = @(Get-ChildItem -LiteralPath $rootInternalPath -Recurse -File -Force)
+    if ($builtFiles.Count -ne $rootFiles.Count) {
+        throw "根目录 _internal 文件数量与构建产物不一致：$($rootFiles.Count) / $($builtFiles.Count)"
+    }
+    foreach ($builtFile in $builtFiles) {
+        $relative = $builtFile.FullName.Substring($builtInternalPath.Length).TrimStart("\", "/")
+        $rootFile = Join-Path $rootInternalPath $relative
+        if (-not (Test-Path -LiteralPath $rootFile -PathType Leaf)) { throw "根目录 _internal 缺少文件：$relative" }
+        if ((Get-Item -LiteralPath $rootFile).Length -ne $builtFile.Length) { throw "根目录 _internal 文件大小不一致：$relative" }
+        $builtHash = (Get-FileHash -LiteralPath $builtFile.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        $rootHash = (Get-FileHash -LiteralPath $rootFile -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($builtHash -ne $rootHash) { throw "根目录 _internal 文件哈希不一致：$relative" }
+    }
+    Remove-Item -LiteralPath $backupInternalPath -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $backupExePath -Force -ErrorAction SilentlyContinue
+} catch {
+    Remove-Item -LiteralPath $rootInternalPath -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $rootExePath -Force -ErrorAction SilentlyContinue
+    if ($rootInternalMoved -and (Test-Path -LiteralPath $backupInternalPath)) {
+        Move-Item -LiteralPath $backupInternalPath -Destination $rootInternalPath -Force
+    }
+    if ($rootExeMoved -and (Test-Path -LiteralPath $backupExePath)) {
+        Move-Item -LiteralPath $backupExePath -Destination $rootExePath -Force
+    }
+    throw
+} finally {
+    if (Test-Path -LiteralPath $syncRoot) { Remove-Item -LiteralPath $syncRoot -Recurse -Force -ErrorAction SilentlyContinue }
 }
 Write-Host "OwVoice.exe and _internal synchronized to: $projectDir" -ForegroundColor Green

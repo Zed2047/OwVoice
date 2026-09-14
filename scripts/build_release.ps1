@@ -1,12 +1,17 @@
 ﻿param(
-    [string]$Version = "v0.2.0",
+    [string]$Version = "",
     [string]$OutputDirectory = "dist",
-    [switch]$SkipArchive
+    [switch]$SkipArchive,
+    [switch]$AllowUntaggedBuild
 )
 
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
 $projectRoot = (Get-Location).Path
+. (Join-Path $PSScriptRoot "release_common.ps1")
+$releaseIdentity = Get-OwVoiceReleaseIdentity -ProjectRoot $projectRoot -ValidateMirrors
+$Version = Resolve-OwVoiceReleaseTag -Identity $releaseIdentity -RequestedVersion $Version
+if (-not $AllowUntaggedBuild) { Assert-OwVoiceReleaseGitTag -Identity $releaseIdentity -ProjectRoot $projectRoot }
 $releaseOutputPath = [System.IO.Path]::GetFullPath((Join-Path $projectRoot $OutputDirectory))
 $releaseStagingPath = Join-Path $releaseOutputPath "release-staging"
 $releaseName = "OwVoice-$Version"
@@ -38,11 +43,13 @@ function Copy-EngineTree([string]$sourceDirectory, [string]$targetDirectory) {
     }
 }
 
-foreach ($file in @("README.md", "CHANGELOG.md", "MODEL_PACKAGE_SPEC.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "pyproject.toml", "uv.lock", "requirements-cpu.txt", "requirements-gpu.txt", "requirements-training.txt")) {
+foreach ($file in @("README.md", "CHANGELOG.md", "MODEL_PACKAGE_SPEC.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "version.json", "resource-lock.json", "release-layout.json", "pyproject.toml", "uv.lock", "requirements-cpu.txt", "requirements-gpu.txt", "requirements-training.txt")) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $file) -Destination $releasePackagePath
 }
 # 发布 ZIP 使用 ASCII 文件名，避免 Windows 压缩工具处理中文文件名时产生乱码。
 [System.IO.File]::Copy((Join-Path (Get-Location) "setup.bat"), (Join-Path $releasePackagePath "setup.bat"), $true)
+Copy-Item -LiteralPath (Join-Path $projectRoot "recover_update.bat") -Destination $releasePackagePath -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot "updater") -Destination $releasePackagePath -Recurse -Force
 foreach ($directory in @("backend", "frontend")) {
     $sourceDirectory = Join-Path $projectRoot $directory
     $targetDirectory = Join-Path $releasePackagePath $directory
@@ -59,7 +66,7 @@ Get-ChildItem -LiteralPath (Join-Path $projectRoot "assets") -Force | Where-Obje
 # Release 只复制首次配置所需脚本，构建和调试脚本留在源码仓库。
 $releaseScriptsTargetPath = Join-Path $releasePackagePath "scripts"
 New-Item -ItemType Directory -Force -Path $releaseScriptsTargetPath | Out-Null
-foreach ($scriptName in @("setup_v2.ps1", "check_env.ps1", "download_pretrained.py", "verify_runtime.py", "setup_training.ps1", "download_nltk_data.py", "update_release.ps1", "repair_update_legacy.ps1", "start_training.ps1")) {
+foreach ($scriptName in @("setup_v2.ps1", "check_env.ps1", "download_pretrained.py", "verify_runtime.py", "setup_training.ps1", "download_nltk_data.py", "update_release.ps1", "update_transaction.ps1", "repair_update_legacy.ps1", "release_common.ps1", "start_training.ps1")) {
     Copy-Item -LiteralPath (Join-Path (Join-Path $projectRoot "scripts") $scriptName) -Destination $releaseScriptsTargetPath -Force
 }
 
@@ -110,6 +117,68 @@ if (-not (Test-Path -LiteralPath (Join-Path $exeSource "OwVoice.exe") -PathType 
 }
 Copy-Item -LiteralPath (Join-Path $exeSource "OwVoice.exe") -Destination $releasePackagePath -Force
 Copy-Item -LiteralPath (Join-Path $exeSource "_internal") -Destination $releasePackagePath -Recurse -Force
+
+# 记录发布产物的可追溯身份，便于定位“同版本、不同构建”问题。
+$pythonExe = Join-Path $projectRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $pythonExe -PathType Leaf)) { throw "缺少构建环境 Python：$pythonExe" }
+$gitCommand = Get-Command git.exe -ErrorAction SilentlyContinue
+if ($null -eq $gitCommand) { throw "无法生成 BUILD_INFO.json：未找到 git.exe。" }
+$gitCommit = ((& $gitCommand.Source -C $projectRoot rev-parse HEAD 2>&1) | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $gitCommit -notmatch '^[0-9a-fA-F]{40}$') { throw "无法读取构建提交哈希。" }
+$pythonVersion = ((& $pythonExe --version 2>&1) | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { throw "无法读取 Python 版本。" }
+$pyinstallerVersion = ((& $pythonExe -m PyInstaller --version 2>&1) | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { throw "无法读取 PyInstaller 版本。" }
+$uvVersion = ((& $uvSource --version 2>&1) | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { throw "无法读取 uv 版本。" }
+$buildArchitecture = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
+$buildInfo = [ordered]@{
+    schema = 1
+    version = $releaseIdentity.version
+    tag = $releaseIdentity.tag
+    channel = $releaseIdentity.channel
+    update_schema = $releaseIdentity.updateSchema
+    git_commit = $gitCommit.ToLowerInvariant()
+    built_at_utc = [DateTime]::UtcNow.ToString("o")
+    python = $pythonVersion
+    pyinstaller = $pyinstallerVersion
+    uv = $uvVersion
+    architecture = $buildArchitecture
+    os = [Environment]::OSVersion.VersionString
+} | ConvertTo-Json
+[System.IO.File]::WriteAllText((Join-Path $releasePackagePath "BUILD_INFO.json"), $buildInfo, $utf8NoBom)
+
+# 包内清单描述所有受发布管理的文件。更新器以它验证完整性并拒绝混版。
+$releaseLayout = Get-Content -LiteralPath (Join-Path $projectRoot "release-layout.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($releaseLayout.schema -ne 1) { throw "release-layout.json schema 无效。" }
+$managedItems = @($releaseLayout.managedItems | ForEach-Object { ([string]$_).Replace("\", "/").Trim("/") })
+$preservePaths = @($releaseLayout.preservePaths | ForEach-Object { ([string]$_).Replace("\", "/").Trim("/") })
+foreach ($item in $managedItems) {
+    if ($item -ne "release-files-v1.json" -and -not (Test-Path -LiteralPath (Join-Path $releasePackagePath $item))) { throw "发布包缺少受管理项：$item" }
+}
+$releaseFiles = @(
+    Get-ChildItem -LiteralPath $releasePackagePath -Recurse -File -Force | ForEach-Object {
+        $relative = $_.FullName.Substring($releasePackagePath.Length).TrimStart("\", "/").Replace("\", "/")
+        $isManaged = @($managedItems | Where-Object { $relative -eq $_ -or $relative.StartsWith($_ + "/", [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+        $isPreserved = @($preservePaths | Where-Object { $relative -eq $_ -or $relative.StartsWith($_ + "/", [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+        if ($isManaged -and -not $isPreserved -and $relative -ne "release-files-v1.json") {
+            [ordered]@{
+                path = $relative
+                size_bytes = $_.Length
+                sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+        }
+    } | Sort-Object path
+)
+$packageManifest = [ordered]@{
+    schema = 1
+    version = $releaseIdentity.version
+    tag = $releaseIdentity.tag
+    managed_items = $managedItems
+    preserve_paths = $preservePaths
+    files = $releaseFiles
+} | ConvertTo-Json -Depth 6
+[System.IO.File]::WriteAllText((Join-Path $releasePackagePath "release-files-v1.json"), $packageManifest, $utf8NoBom)
 
 # 发布前硬性检查用户数据隔离。以后即使复制规则被修改，也不能静默把开发机
 # 的模型、训练记录、虚拟环境或缓存带入公开包。

@@ -16,6 +16,7 @@ import requests
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from backend.app_version import get_app_version
 from backend.model_catalog import ModelCatalogError, get_character_root, load_installed_models
 from backend.model_manager import ModelManager, ModelManagerError
 from backend.training_errors import TrainingError
@@ -23,6 +24,7 @@ from backend.update_manager import UpdateManager, UpdateManagerError
 
 
 PROJECT_DIR = Path(os.environ.get("OWVOICE_PROJECT_DIR", Path(__file__).resolve().parents[1]))
+APP_VERSION = get_app_version(PROJECT_DIR)
 CONFIG_DIR = PROJECT_DIR / "config"
 CACHE_DIR = PROJECT_DIR / ".cache" / "synthesis"
 CONFIG_PATH = Path(os.environ.get("OWVOICE_CONFIG", CONFIG_DIR / "voices.local.json"))
@@ -30,9 +32,9 @@ if not CONFIG_PATH.is_absolute():
     CONFIG_PATH = PROJECT_DIR / CONFIG_PATH
 GSV_API = os.environ.get("OWVOICE_GSV_API", "http://127.0.0.1:9880").rstrip("/")
 MODEL_MANAGER = ModelManager(PROJECT_DIR, os.environ.get("OWVOICE_MODEL_INDEX_URL"))
-UPDATE_MANAGER = UpdateManager(os.environ.get("OWVOICE_APP_VERSION", "0.2.0"))
+UPDATE_MANAGER = UpdateManager(APP_VERSION)
 
-app = FastAPI(title="OwVoice API", version="0.2.0")
+app = FastAPI(title="OwVoice API", version=APP_VERSION)
 _model_lock = threading.Lock()
 _synthesis_lock = threading.Lock()
 _active_model_key: str | None = None
@@ -366,6 +368,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "owvoice": True,
+        "version": APP_VERSION,
         "project_dir": str(PROJECT_DIR),
         "gpt_sovits_online": engine_online(),
         "gpt_sovits_api": GSV_API,

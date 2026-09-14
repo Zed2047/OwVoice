@@ -2,6 +2,7 @@ import importlib.util
 import tempfile
 import unittest
 import zipfile
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -54,6 +55,29 @@ class DownloadPretrainedTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     module.safe_extract_all(archive, root / "extract")
             self.assertFalse((root / "outside.txt").exists())
+
+    def test_resource_lock_contains_fixed_external_sources(self):
+        module = load_download_module()
+        self.assertTrue(module.FFMPEG_URL.endswith("ffmpeg-9.0.1-essentials_build.zip"))
+        self.assertEqual(len(module.FFMPEG_ARCHIVE_SHA256), 64)
+        self.assertEqual(module.G2PW_ARCHIVE_SIZE, 588857174)
+        self.assertEqual(len(module.REQUIRED_FILE_CHECKS), 12)
+
+    def test_unpinned_fasttext_override_is_ignored_by_default(self):
+        module = load_download_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls = []
+
+            def fake_download(url, target, **kwargs):
+                calls.append(url)
+                raise RuntimeError("offline")
+
+            with patch.object(module, "TARGET_DIR", root), patch.object(module, "download_file", side_effect=fake_download), patch.dict(
+                os.environ, {"OWVOICE_LID_URL": "https://invalid.example/lid.176.bin"}, clear=False
+            ):
+                self.assertFalse(module.ensure_fasttext_lid())
+            self.assertEqual(calls, [module.FASTTEXT_LID_URL])
 
 
 if __name__ == "__main__":

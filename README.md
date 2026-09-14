@@ -21,7 +21,7 @@ OwVoice 学习交流 QQ 群：1121380498，欢迎交流项目问题、改进建�
 - CPU 模式至少预留 15GB，GPU 模式至少预留 24GB；可选训练还会额外下载训练底模
 - Microsoft Visual C++ 2015-2022 x64 运行库（多数 Windows 10/11 已自带；缺失时安装器会给出官方地址）
 
-无需安装 Python、C/C++、CMake 或 Visual Studio。发布包内置经过校验的 `uv`，会把固定版本 Python 和完整锁定的依赖安装到项目目录，不修改系统 Python、PATH 或注册表；随后下载并校验 GPT-SoVITS 与 NLTK 资源。
+无需安装 Python、C/C++、CMake 或 Visual Studio。发布包内置经过校验的 `uv`，会把固定版本 Python 和完整锁定的依赖安装到项目目录，不修改系统 Python、PATH 或注册表；随后根据 `resource-lock.json` 下载并校验 FFmpeg、G2PW、GPT-SoVITS、FastText 与 NLTK 资源。
 
 ### 3. 首次配置
 
@@ -30,7 +30,7 @@ OwVoice 学习交流 QQ 群：1121380498，欢迎交流项目问题、改进建�
 3. 等待窗口显示配置完成。
 4. 配置完成后关闭窗口。
 
-首次配置因为要配置环境、下载模型，可能需要较长时间，请不要中途关闭窗口。
+首次配置因为要配置环境、下载模型，可能需要较长时间，请不要中途关闭窗口。完整 FastText 语言检测模型下载失败时，安装器会明确提示并使用较小的内置模型，不会因此阻塞安装；之后可重新运行 `setup.bat` 补下载。
 之后使用时直接双击 `OwVoice.exe`，不需要再次运行配置脚本。
 
 ### 4. 生成语音
@@ -43,6 +43,8 @@ OwVoice 学习交流 QQ 群：1121380498，欢迎交流项目问题、改进建�
 6. 点击“本地模型库”可导入、查看或删除本地模型；模型不会联网下载。
 7. 点击“检查更新”可更新程序和 GPT-SoVITS 代码；配置、模型、输出文件和缓存会保留。
 8. 合成完成后可以播放、打开文件或删除 WAV 文件。
+
+如果更新过程中断或电脑意外关机，请先关闭 OwVoice，再双击安装目录中的 `recover_update.bat`。恢复入口会根据事务记录自动恢复完整旧版本；恢复后可以重新打开程序并再次检查更新，不会删除模型、配置或输出文件。
 
 > v0.1.2 升级到 v0.2.0：请下载 `UpdateBridge-v0.2.0.zip`，把压缩包内容解压到原 OwVoice 目录并允许覆盖，然后双击 `修复更新器.bat`。这是旧版用户唯一需要执行的一次手动桥接；从 v0.2.0 开始可继续使用程序内自动更新。
 
@@ -100,6 +102,12 @@ GPU 模式请确认 NVIDIA 驱动和 `nvidia-smi` 正常；没有 NVIDIA 显卡�
 .\.venv\Scripts\python.exe scripts\download_nltk_data.py
 ```
 
+开发者发布前统一运行测试：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
 `scripts\start_training.ps1` 仅供开发者排查 GPT-SoVITS 原始 WebUI，不是普通用户入口。训练失败时，应优先查看 OwVoice 向导中的训练日志。
 
 ## 发布包内容
@@ -112,7 +120,7 @@ GPU 模式请确认 NVIDIA 驱动和 `nvidia-smi` 正常；没有 NVIDIA 显卡�
 - 本地模型库目录（初始为空，模型和参考音频需由用户自行准备或导入）
 - 本地模型库、本地训练入口和程序更新功能（训练依赖与训练底模按需安装）
 - GPT-SoVITS 推理代码
-- 配置模板和许可证说明
+- `resource-lock.json` 资源锁、配置模板和许可证说明
 
 普通用户不需要修改配置文件，也不需要直接运行 Python 文件。
 
@@ -126,6 +134,8 @@ uv sync --extra cpu  # 或 uv sync --extra gpu，用于开发环境
 .\scripts\build_release.ps1
 .\scripts\build_update_bridge.ps1
 ```
+
+`build_release.ps1` 和 `build_update_bridge.ps1` 的正式构建要求当前提交已有匹配的 `v0.2.0` tag；仅生成未发布的候选包时显式追加 `-AllowUntaggedBuild`。
 
 开发与发布环境以 `pyproject.toml` 和 `uv.lock` 为唯一可复现安装入口；`requirements-*.txt` 保留作人工查阅。先构建 EXE，再按需生成发布包。暂不生成 ZIP 进行日常测试。
 

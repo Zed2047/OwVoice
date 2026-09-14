@@ -9,6 +9,7 @@ import zipfile
 import argparse
 import time
 import hashlib
+import json
 from pathlib import Path
 
 import requests
@@ -19,32 +20,52 @@ TARGET_DIR = PROJECT_DIR / "GPT-SoVITS" / "GPT_SoVITS" / "pretrained_models"
 ENGINE_DIR = PROJECT_DIR / "GPT-SoVITS"
 TEXT_DIR = ENGINE_DIR / "GPT_SoVITS" / "text"
 DOWNLOAD_DIR = PROJECT_DIR / ".cache" / "setup-downloads"
-FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-G2PW_URL = "https://www.modelscope.cn/models/kamiorinn/g2pw/resolve/master/G2PWModel_1.1.zip"
+RESOURCE_LOCK_PATH = PROJECT_DIR / "resource-lock.json"
+
+
+def load_resource_lock() -> dict:
+    try:
+        lock = json.loads(RESOURCE_LOCK_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"资源锁文件无效：{RESOURCE_LOCK_PATH}") from exc
+    if lock.get("schema") != 1:
+        raise RuntimeError(f"不支持的资源锁 schema：{lock.get('schema')}")
+    return lock
+
+
+RESOURCE_LOCK = load_resource_lock()
+FFMPEG_INFO = RESOURCE_LOCK["ffmpeg"]
+G2PW_INFO = RESOURCE_LOCK["g2pw"]
+FASTTEXT_INFO = RESOURCE_LOCK["fasttext"]
+PRETRAINED_INFO = RESOURCE_LOCK["pretrained"]
+FFMPEG_URL = FFMPEG_INFO["url"]
+FFMPEG_VERSION = FFMPEG_INFO["version"]
+FFMPEG_ARCHIVE_SHA256 = FFMPEG_INFO["sha256"]
+G2PW_URL = G2PW_INFO["url"]
+G2PW_ARCHIVE_SIZE = G2PW_INFO["size_bytes"]
+G2PW_ARCHIVE_SHA256 = G2PW_INFO["sha256"]
 G2PW_ONNX_SIZE = 635212732
 G2PW_ONNX_SHA256 = "2eb3c71fd95117b2e1abef8d2d0cd78aae894bbe7f0fac105ddc9c32ce63cbd0"
-DEFAULT_PRETRAINED_REPO = "lj1995/GPT-SoVITS"
-DEFAULT_PRETRAINED_REVISION = "336b2ec4e8d4ac74740798dd40af44e74659ecaf"
-FASTTEXT_LID_URL = "https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin"
-FASTTEXT_LID_SIZE = 131266198
-FASTTEXT_LID_SHA256 = "7e69ec5451bc261cc7844e49e4792a85d7f09c06789ec800fc4a44aec362764e"
-REQUIRED_FILES = (
-    TARGET_DIR / "s1v3.ckpt",
-    TARGET_DIR / "chinese-hubert-base" / "config.json",
-    TARGET_DIR / "chinese-roberta-wwm-ext-large" / "config.json",
-    TARGET_DIR / "gsv-v4-pretrained" / "s2Gv4.pth",
-    TARGET_DIR / "gsv-v4-pretrained" / "vocoder.pth",
-)
-REQUIRED_FILE_CHECKS = {
-    TARGET_DIR / "s1v3.ckpt": (155284856, "87133414860ea14ff6620c483a3db5ed07b44be42e2c3fcdad65523a729a745a"),
-    TARGET_DIR / "gsv-v4-pretrained" / "s2Gv4.pth": (769025545, "906fe22f48c3e037a389df291d4d32a9414e15dbb8f9628643e83aaced109ea4"),
-    TARGET_DIR / "gsv-v4-pretrained" / "vocoder.pth": (57781109, "4d611913df7b12d49e8976c944558d2d096816365edfc6c35a9e85b67dd14ed9"),
+DEFAULT_PRETRAINED_REPO = PRETRAINED_INFO["repo"]
+DEFAULT_PRETRAINED_REVISION = PRETRAINED_INFO["revision"]
+FASTTEXT_LID_URL = FASTTEXT_INFO["url"]
+FASTTEXT_LID_SIZE = FASTTEXT_INFO["size_bytes"]
+FASTTEXT_LID_SHA256 = FASTTEXT_INFO["sha256"]
+TRAINING_RELATIVE_FILES = {
+    "sv/pretrained_eres2netv2w24s4ep4.ckpt",
+    "v2Pro/s2Gv2Pro.pth",
+    "v2Pro/s2Dv2Pro.pth",
 }
-TRAINING_REQUIRED_FILES = (
-    TARGET_DIR / "sv" / "pretrained_eres2netv2w24s4ep4.ckpt",
-    TARGET_DIR / "v2Pro" / "s2Gv2Pro.pth",
-    TARGET_DIR / "v2Pro" / "s2Dv2Pro.pth",
+REQUIRED_FILES = tuple(
+    TARGET_DIR / relative
+    for relative in PRETRAINED_INFO["files"]
+    if relative not in TRAINING_RELATIVE_FILES
 )
+TRAINING_REQUIRED_FILES = tuple(TARGET_DIR / relative for relative in sorted(TRAINING_RELATIVE_FILES))
+REQUIRED_FILE_CHECKS = {
+    TARGET_DIR / relative: (info["size_bytes"], info["sha256"])
+    for relative, info in PRETRAINED_INFO["files"].items()
+}
 ALLOW_PATTERNS = [
     "s1v3.ckpt",
     "chinese-hubert-base/**",
@@ -146,18 +167,26 @@ def download_file(
     raise RuntimeError(f"下载失败：{url}\n{last_error}") from last_error
 
 
-def ensure_zip_download(url: str, target: Path) -> None:
+def ensure_zip_download(
+    url: str,
+    target: Path,
+    *,
+    expected_size: int | None = None,
+    expected_sha256: str | None = None,
+) -> None:
     """下载并验证 ZIP；已有损坏缓存会自动重新下载。"""
 
     if target.is_file():
         try:
+            if not file_matches(target, expected_size=expected_size, expected_sha256=expected_sha256):
+                raise OSError("ZIP 大小或 SHA256 不匹配")
             with zipfile.ZipFile(target) as package:
                 if package.testzip() is not None:
                     raise zipfile.BadZipFile("ZIP 内部文件校验失败")
             return
         except (OSError, zipfile.BadZipFile):
             target.unlink(missing_ok=True)
-    download_file(url, target)
+    download_file(url, target, expected_size=expected_size, expected_sha256=expected_sha256)
     try:
         with zipfile.ZipFile(target) as package:
             if package.testzip() is not None:
@@ -168,10 +197,13 @@ def ensure_zip_download(url: str, target: Path) -> None:
 
 
 def safe_extract_all(package: zipfile.ZipFile, destination: Path) -> None:
-    """拒绝绝对路径和目录穿越条目，再解压到指定临时目录。"""
+    """拒绝绝对路径、目录穿越和链接条目，再解压到指定临时目录。"""
 
     root = destination.resolve()
     for info in package.infolist():
+        mode = (info.external_attr >> 16) & 0xFFFF
+        if mode and (mode & 0o170000) == 0o120000:
+            raise RuntimeError(f"压缩包包含不安全链接：{info.filename}")
         output = (destination / info.filename).resolve()
         try:
             output.relative_to(root)
@@ -180,7 +212,7 @@ def safe_extract_all(package: zipfile.ZipFile, destination: Path) -> None:
     package.extractall(destination)
 
 
-def ffmpeg_works(path: Path) -> bool:
+def ffmpeg_works(path: Path, *, expected_version: str = FFMPEG_VERSION) -> bool:
     if not path.is_file() or path.stat().st_size < 50 * 1024 * 1024:
         return False
     try:
@@ -189,16 +221,28 @@ def ffmpeg_works(path: Path) -> bool:
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    return result.returncode == 0 and result.stdout.startswith("ffmpeg version")
+    return result.returncode == 0 and result.stdout.startswith(f"ffmpeg version {expected_version}")
+
+
+def ffprobe_works(path: Path, *, expected_version: str = FFMPEG_VERSION) -> bool:
+    if not path.is_file() or path.stat().st_size < 50 * 1024 * 1024:
+        return False
+    try:
+        result = subprocess.run(
+            [str(path), "-version"], capture_output=True, text=True, timeout=15, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and result.stdout.startswith(f"ffprobe version {expected_version}")
 
 
 def ensure_ffmpeg() -> None:
     ffmpeg = ENGINE_DIR / "ffmpeg.exe"
     ffprobe = ENGINE_DIR / "ffprobe.exe"
-    if ffmpeg_works(ffmpeg) and ffprobe.is_file() and ffprobe.stat().st_size >= 50 * 1024 * 1024:
+    if ffmpeg_works(ffmpeg) and ffprobe_works(ffprobe):
         return
     archive = DOWNLOAD_DIR / "ffmpeg-essentials.zip"
-    ensure_zip_download(FFMPEG_URL, archive)
+    ensure_zip_download(FFMPEG_URL, archive, expected_sha256=FFMPEG_ARCHIVE_SHA256)
     print("Extracting ffmpeg...")
     with zipfile.ZipFile(archive) as package:
         names = package.namelist()
@@ -210,7 +254,7 @@ def ensure_ffmpeg() -> None:
             with package.open(matches[0]) as source, temporary.open("wb") as target:
                 shutil.copyfileobj(source, target)
             temporary.replace(destination)
-    if not ffmpeg_works(ffmpeg):
+    if not ffmpeg_works(ffmpeg) or not ffprobe_works(ffprobe):
         raise RuntimeError("ffmpeg 解压完成但无法运行；压缩包可能损坏或不兼容当前 Windows。")
 
 
@@ -220,7 +264,12 @@ def ensure_g2pw() -> None:
     if file_matches(model_file, expected_size=G2PW_ONNX_SIZE, expected_sha256=G2PW_ONNX_SHA256):
         return
     archive = DOWNLOAD_DIR / "G2PWModel_1.1.zip"
-    ensure_zip_download(G2PW_URL, archive)
+    ensure_zip_download(
+        G2PW_URL,
+        archive,
+        expected_size=G2PW_ARCHIVE_SIZE,
+        expected_sha256=G2PW_ARCHIVE_SHA256,
+    )
     staging_root = TEXT_DIR / (".g2pw-extract-" + str(os.getpid()))
     if staging_root.exists():
         shutil.rmtree(staging_root)
@@ -254,10 +303,11 @@ def ensure_fasttext_lid() -> bool:
     if target.exists():
         target.unlink()
 
-    urls = []
-    if os.environ.get("OWVOICE_LID_URL"):
-        urls.append(os.environ["OWVOICE_LID_URL"])
-    urls.append(FASTTEXT_LID_URL)
+    urls = [FASTTEXT_LID_URL]
+    if os.environ.get("OWVOICE_ALLOW_UNPINNED_RESOURCES") == "1" and os.environ.get("OWVOICE_LID_URL"):
+        urls.insert(0, os.environ["OWVOICE_LID_URL"])
+    elif os.environ.get("OWVOICE_LID_URL"):
+        print("忽略 OWVOICE_LID_URL：正式安装默认只允许资源锁中的固定来源。")
     last_error = None
     for url in urls:
         try:
@@ -281,6 +331,21 @@ def ensure_fasttext_lid() -> bool:
     return False
 
 
+def verify_pretrained_files(*, training: bool = False) -> None:
+    """按资源锁完整核对已下载模型，防止只检查少数入口文件造成混版。"""
+
+    required = set(REQUIRED_FILES)
+    if training:
+        required.update(TRAINING_REQUIRED_FILES)
+    failures = []
+    for path in sorted(required, key=str):
+        check = REQUIRED_FILE_CHECKS.get(path)
+        if check is None or not file_matches(path, expected_size=check[0], expected_sha256=check[1]):
+            failures.append(str(path.relative_to(TARGET_DIR)))
+    if failures:
+        raise RuntimeError("预训练资源大小或 SHA256 校验失败：" + ", ".join(failures))
+
+
 def download(*, training: bool = False) -> None:
     ensure_ffmpeg()
     ensure_g2pw()
@@ -291,16 +356,18 @@ def download(*, training: bool = False) -> None:
             raise RuntimeError("huggingface_hub is missing; GPT-SoVITS dependencies were not installed.") from exc
 
         TARGET_DIR.mkdir(parents=True, exist_ok=True)
-        repo_id = os.environ.get("OWVOICE_PRETRAINED_REPO", DEFAULT_PRETRAINED_REPO)
-        revision = os.environ.get(
-            "OWVOICE_PRETRAINED_REVISION",
-            DEFAULT_PRETRAINED_REVISION if repo_id == DEFAULT_PRETRAINED_REPO else "main",
-        )
+        allow_unpinned = os.environ.get("OWVOICE_ALLOW_UNPINNED_RESOURCES") == "1"
+        requested_repo = os.environ.get("OWVOICE_PRETRAINED_REPO")
+        requested_revision = os.environ.get("OWVOICE_PRETRAINED_REVISION")
+        if (requested_repo or requested_revision) and not allow_unpinned:
+            print("忽略未固定的预训练资源覆盖；正式安装使用 resource-lock.json。")
+        repo_id = requested_repo if allow_unpinned and requested_repo else DEFAULT_PRETRAINED_REPO
+        revision = requested_revision if allow_unpinned and requested_revision else DEFAULT_PRETRAINED_REVISION
         print(f"Downloading GPT-SoVITS assets from {repo_id}...")
         endpoints = []
-        if os.environ.get("HF_ENDPOINT"):
+        if allow_unpinned and os.environ.get("HF_ENDPOINT"):
             endpoints.append(os.environ["HF_ENDPOINT"])
-        endpoints.extend(["https://hf-mirror.com", None])
+        endpoints.extend([None, "https://hf-mirror.com"])
         last_error = None
         for endpoint in endpoints:
             try:
@@ -317,6 +384,7 @@ def download(*, training: bool = False) -> None:
                     required = REQUIRED_FILES + (TRAINING_REQUIRED_FILES if training else ())
                     missing = [str(path.relative_to(TARGET_DIR)) for path in required if not path.is_file()]
                     raise RuntimeError("下载源返回成功但资源仍缺失：" + ", ".join(missing))
+                verify_pretrained_files(training=training)
                 last_error = None
                 break
             except Exception as exc:
@@ -327,6 +395,7 @@ def download(*, training: bool = False) -> None:
 
     ensure_fasttext_lid()
     if ready(training=training):
+        verify_pretrained_files(training=training)
         scope = "training and inference" if training else "inference"
         print(f"GPT-SoVITS {scope} pretrained assets already exist.")
         return

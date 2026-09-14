@@ -23,7 +23,7 @@ class UpdateManagerTests(unittest.TestCase):
             {"name": "UpdateBridge-v0.2.0.zip", "browser_download_url": "https://example.invalid/bridge"},
             {"name": "release-manifest-v2-v0.2.0.json", "browser_download_url": "https://example.invalid/manifest"},
         ]}
-        manifest = {"schema": 2, "archive_name": "OwVoice-v0.2.0.zip", "sha256": "a" * 64}
+        manifest = {"schema": 2, "version": "v0.2.0", "archive_name": "OwVoice-v0.2.0.zip", "sha256": "a" * 64, "size_bytes": 42}
         with patch("backend.update_manager.requests.get", side_effect=[response(release), response(manifest)]):
             result = UpdateManager("0.1.2").check()
         self.assertTrue(result["app"]["available"])

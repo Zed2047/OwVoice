@@ -52,13 +52,14 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from backend.app_version import get_app_version
 
 
 API_URL = os.environ.get("OWVOICE_API", "http://127.0.0.1:8765").rstrip("/")
-APP_VERSION = os.environ.get("OWVOICE_APP_VERSION", "0.2.0")
 PROJECT_DIR = Path(
     os.environ.get("OWVOICE_PROJECT_DIR", Path(__file__).resolve().parents[1])
 )
+APP_VERSION = get_app_version(PROJECT_DIR)
 OUTPUT_DIR = PROJECT_DIR / "output"
 _ICON_CANDIDATES = [PROJECT_DIR / "assets" / "OwVoice.ico"]
 if getattr(sys, "frozen", False):
@@ -2292,8 +2293,9 @@ class OwVoiceApp(QMainWindow):
                 return
             download_url = str(app_update.get("downloadUrl") or "")
             sha256 = str(app_update.get("sha256") or "")
-            script = PROJECT_DIR / "scripts" / "update_release.ps1"
-            if not download_url or len(sha256) != 64 or not script.is_file():
+            expected_size = int(app_update.get("size") or 0)
+            script = PROJECT_DIR / "updater" / "update_release.ps1"
+            if not download_url or len(sha256) != 64 or expected_size < 1 or not script.is_file():
                 if not silent:
                     QMessageBox.warning(self, "暂时无法更新", "发现新版本，但当前发布包缺少完整校验信息，请稍后再试。")
                 return
@@ -2311,6 +2313,7 @@ class OwVoiceApp(QMainWindow):
                 "-File", str(script),
                 "-DownloadUrl", download_url,
                 "-Sha256", sha256,
+                "-ExpectedSize", str(expected_size),
                 "-TargetDirectory", str(PROJECT_DIR),
                 "-WaitPid", str(os.getpid()),
                 "-RestartPath", str(PROJECT_DIR / "OwVoice.exe"),
