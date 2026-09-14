@@ -42,7 +42,7 @@ foreach ($directory in @("backend", "frontend", "assets\avatars", "GPT-SoVITS\GP
 [System.IO.File]::WriteAllText((Join-Path $package "GPT-SoVITS\new.py"), "new")
 [System.IO.File]::WriteAllText((Join-Path $package "tools\uv\uv.exe"), "new-uv")
 [System.IO.File]::WriteAllText((Join-Path $package "config\voices.example.json"), "example")
-foreach ($file in @("OwVoice.exe", "requirements-cpu.txt", "requirements-gpu.txt", "requirements-training.txt", "BUILD_INFO.json", "pyproject.toml", "uv.lock", "setup.bat", "README.md", "CHANGELOG.md", "MODEL_PACKAGE_SPEC.md", "LICENSE", "THIRD_PARTY_NOTICES.md")) {
+foreach ($file in @("OwVoice.exe", "requirements-cpu.txt", "requirements-gpu.txt", "requirements-training.txt", "BUILD_INFO.json", "pyproject.toml", "uv.lock", "resource-lock.json", "setup.bat", "README.md", "CHANGELOG.md", "MODEL_PACKAGE_SPEC.md", "LICENSE", "THIRD_PARTY_NOTICES.md")) {
     [System.IO.File]::WriteAllText((Join-Path $package $file), "new")
 }
 [System.IO.File]::WriteAllText((Join-Path $package "version.json"), '{"version":"0.2.0","channel":"stable","updateSchema":2}')
