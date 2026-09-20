@@ -64,15 +64,15 @@ OwVoice 是一个守望先锋角色本地语音合成工具，使用 GPT-SoVITS 
 <table>
   <tr>
     <td width="22%" align="center"><img src="readme-assets/avatars/wuyang.png" alt="无漾头像" width="96"><br><strong>无漾</strong></td>
-    <td valign="middle"><strong>「大专聚会加我一个」</strong><br><audio controls preload="none"><source src="readme-assets/audio/wuyang-dazhuan-juhui.wav" type="audio/wav"></audio><br><a href="readme-assets/audio/wuyang-dazhuan-juhui.wav">下载 WAV</a></td>
+    <td valign="middle"><strong>「大专聚会加我一个」</strong><br><a href="https://raw.githubusercontent.com/Zed2047/OwVoice/main/readme-assets/audio/wuyang-dazhuan-juhui.wav">▶ 在线播放 / 下载 WAV</a></td>
   </tr>
   <tr>
     <td align="center"><img src="readme-assets/avatars/wuzi.png" alt="雾子头像" width="96"><br><strong>雾子</strong></td>
-    <td valign="middle"><strong>「雾子大人在此」</strong><br><audio controls preload="none"><source src="readme-assets/audio/wuzi.wav" type="audio/wav"></audio><br><a href="readme-assets/audio/wuzi.wav">下载 WAV</a></td>
+    <td valign="middle"><strong>「雾子大人在此」</strong><br><a href="https://raw.githubusercontent.com/Zed2047/OwVoice/main/readme-assets/audio/wuzi.wav">▶ 在线播放 / 下载 WAV</a></td>
   </tr>
   <tr>
     <td align="center"><img src="readme-assets/avatars/juno.png" alt="朱诺头像" width="96"><br><strong>朱诺</strong></td>
-    <td valign="middle"><strong>「小朱诺诺的」</strong><br><audio controls preload="none"><source src="readme-assets/audio/juno-xiaozhunuonuo.wav" type="audio/wav"></audio><br><a href="readme-assets/audio/juno-xiaozhunuonuo.wav">下载 WAV</a></td>
+    <td valign="middle"><strong>「小朱诺诺的」</strong><br><a href="https://raw.githubusercontent.com/Zed2047/OwVoice/main/readme-assets/audio/juno-xiaozhunuonuo.wav">▶ 在线播放 / 下载 WAV</a></td>
   </tr>
 </table>
 

@@ -44,6 +44,8 @@ output/
 *.ogg
 *.flac
 *.m4a
+!readme-assets/audio/
+!readme-assets/audio/*.wav
 
 # 日志与本地配置
 logs/
