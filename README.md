@@ -64,15 +64,15 @@ OwVoice 是一个守望先锋角色本地语音合成工具，使用 GPT-SoVITS 
 <table>
   <tr>
     <td width="22%" align="center"><img src="readme-assets/avatars/wuyang.png" alt="无漾头像" width="96"><br><strong>无漾</strong></td>
-    <td valign="middle"><strong>「大专聚会加我一个」</strong><br><audio controls preload="metadata"><source src="https://raw.githubusercontent.com/Zed2047/OwVoice/main/readme-assets/audio/wuyang-dazhuan-juhui.wav" type="audio/wav">你的浏览器不支持音频播放。</audio></td>
+    <td valign="middle"><strong>「大专聚会加我一个」</strong><br><video controls preload="metadata" src="https://github.com/user-attachments/assets/9a66b3c0-a6a0-4349-b3cd-3401e8b23570"></video></td>
   </tr>
   <tr>
     <td align="center"><img src="readme-assets/avatars/wuzi.png" alt="雾子头像" width="96"><br><strong>雾子</strong></td>
-    <td valign="middle"><strong>「雾子大人在此」</strong><br><audio controls preload="metadata"><source src="https://raw.githubusercontent.com/Zed2047/OwVoice/main/readme-assets/audio/wuzi.wav" type="audio/wav">你的浏览器不支持音频播放。</audio></td>
+    <td valign="middle"><strong>「雾子大人在此」</strong><br><video controls preload="metadata" src="https://github.com/user-attachments/assets/347a12db-0794-49f3-be15-0ec6c1d3fabd"></video></td>
   </tr>
   <tr>
     <td align="center"><img src="readme-assets/avatars/juno.png" alt="朱诺头像" width="96"><br><strong>朱诺</strong></td>
-    <td valign="middle"><strong>「小朱诺诺的」</strong><br><audio controls preload="metadata"><source src="https://raw.githubusercontent.com/Zed2047/OwVoice/main/readme-assets/audio/juno-xiaozhunuonuo.wav" type="audio/wav">你的浏览器不支持音频播放。</audio></td>
+    <td valign="middle"><strong>「小朱诺诺的」</strong><br><video controls preload="metadata" src="https://github.com/user-attachments/assets/2b98e1d2-3ee7-43a1-999b-2ebb5111b8b3"></video></td>
   </tr>
 </table>
 
