@@ -1,0 +1,147 @@
+{
+  "modules": {
+    "frontend.app": {
+      "source": "frontend/app.py",
+      "classes": {
+        "ModelPlazaPage": {
+          "bindings": {
+            "_update_buttons": "_ow_update_local_model_buttons",
+            "__init__": "_ow_model_page_init"
+          },
+          "saved_originals": ["_ow_model_page_base_init"]
+        },
+        "TrainingPage": {
+          "bindings": {
+            "_build_ui": "_ow_training_build_ui",
+            "_choose_audio": "_ow_training_choose_audio",
+            "_create_job": "_ow_training_create_job",
+            "_render_job": "_ow_training_render_job",
+            "_ow_training_render_job": "_ow_training_render_job",
+            "_job_created": "_ow_training_job_created",
+            "_request": "_ow_training_request",
+            "_request_loaded": "_ow_training_request_loaded",
+            "_request_finished": "_ow_training_request_finished",
+            "_request_failed": "_ow_training_request_failed",
+            "_set_buttons": "_ow_training_set_buttons",
+            "_frontend_error": "_ow_training_frontend_error",
+            "_ow_training_frontend_error": "_ow_training_frontend_error",
+            "_ow_training_set_status": "_ow_training_set_status",
+            "_ow_training_set_step": "_ow_training_set_step",
+            "_ow_training_set_file_view": "_ow_training_set_file_view",
+            "_ow_training_update_heartbeat": "_ow_training_update_heartbeat",
+            "_ow_training_send_heartbeat": "_ow_training_send_heartbeat",
+            "_ow_training_bridge_loaded": "_ow_training_bridge_loaded",
+            "_ow_training_bridge_failed": "_ow_training_bridge_failed",
+            "_ow_training_bridge_finished": "_ow_training_bridge_finished",
+            "_ow_training_confirm_stop": "_ow_training_confirm_stop",
+            "_ow_training_wait_for_cancel_slot": "_ow_training_wait_for_cancel_slot",
+            "_ow_training_finish_pending_navigation": "_ow_training_finish_pending_navigation",
+            "_ow_training_can_close": "_ow_training_can_close",
+            "_ow_training_show_log": "_ow_training_show_log",
+            "_ow_training_log_loaded": "_ow_training_log_loaded",
+            "_ow_training_refresh_log": "_ow_training_refresh_log",
+            "_ow_training_log_dialog_closed": "_ow_training_log_dialog_closed",
+            "_ow_training_step_for_job": "_ow_training_step_for_job",
+            "_ow_training_set_buttons": "_ow_training_set_buttons",
+            "_ow_training_request_loaded": "_ow_training_request_loaded",
+            "_ow_training_request_finished": "_ow_training_request_finished",
+            "_ow_training_request_failed": "_ow_training_request_failed",
+            "_ow_training_go_to_text": "_ow_training_go_to_text",
+            "_ow_training_files_changed": "_ow_training_files_changed",
+            "_ow_training_choose_avatar": "_ow_training_choose_avatar",
+            "_ow_training_avatar_changed": "_ow_training_avatar_changed",
+            "_ow_training_load_avatar": "_ow_training_load_avatar",
+            "_ow_training_avatar_loaded": "_ow_training_avatar_loaded",
+            "_ow_training_avatar_preview_finished": "_ow_training_avatar_preview_finished",
+            "_ow_training_action_started": "_ow_training_action_started",
+            "_ow_training_animate_status": "_ow_training_animate_status",
+            "_ow_training_reset_preview_buttons": "_ow_training_reset_preview_buttons",
+            "_ow_training_play_audio": "_ow_training_play_audio",
+            "_ow_training_preview_status": "_ow_training_preview_status",
+            "_ow_training_preview_error": "_ow_training_preview_error",
+            "_ow_training_remove_audio": "_ow_training_remove_audio",
+            "_ow_training_clear_audio": "_ow_training_clear_audio",
+            "_ow_training_recent_job_loaded": "_ow_training_recent_job_loaded",
+            "_ow_training_text_changed": "_ow_training_text_changed",
+            "_ow_training_navigate": "_ow_training_navigate",
+            "_ow_training_retry": "_ow_training_retry",
+            "_text_saved": "_ow_training_text_saved",
+            "_prepare": "_ow_training_prepare",
+            "_start_prepare_request": "_ow_training_start_prepare_request",
+            "_action_started": "_ow_training_action_started",
+            "_transcribe": "_ow_training_transcribe",
+            "_start_training": "_ow_training_start_training",
+            "_ow_training_engine_released": "_ow_training_engine_released",
+            "_ow_training_process_stopped": "_ow_training_process_stopped",
+            "_ow_training_process_stop_failed": "_ow_training_process_stop_failed",
+            "_finalize": "_ow_training_finalize",
+            "_cancel": "_ow_training_cancel",
+            "restore_latest_job": "_ow_training_restore_latest_job",
+            "prepare_environment": "_ow_training_prepare_environment",
+            "_ow_training_environment_loaded": "_ow_training_environment_loaded",
+            "_ow_training_restore_latest_job": "_ow_training_restore_latest_job",
+            "_ow_training_start_setup": "_ow_training_start_setup",
+            "_ow_training_setup_output": "_ow_training_setup_output",
+            "_ow_training_setup_success": "_ow_training_setup_success",
+            "_ow_training_setup_failed": "_ow_training_setup_failed",
+            "_ow_training_setup_finished": "_ow_training_setup_finished"
+          },
+          "saved_originals": [
+            "_ow_training_original_transcribe",
+            "_ow_training_original_start_training",
+            "_ow_training_original_finalize",
+            "_ow_training_original_cancel"
+          ]
+        },
+        "OwVoiceApp": {
+          "bindings": {
+            "__init__": "_ow_app_init_with_training",
+            "open_model_plaza": "_ow_open_model_plaza_full",
+            "show_workspace": "_ow_show_workspace_with_sidebar",
+            "_ow_model_release_success": "_ow_model_release_success",
+            "_ow_model_release_failed": "_ow_model_release_failed",
+            "_ow_model_release_finished": "_ow_model_release_finished"
+          },
+          "saved_originals": [
+            "_ow_app_base_init",
+            "_ow_app_base_open_model_plaza",
+            "_ow_app_base_show_workspace"
+          ]
+        }
+      }
+    },
+    "frontend.startup": {
+      "source": "frontend/startup.py",
+      "classes": {
+        "StartupWorker": {
+          "bindings": {
+            "load_config": "_ow_load_config_safe",
+            "start_gpt_sovits": "_ow_start_gpt_sovits",
+            "start_backend": "_ow_start_backend",
+            "wait_model_catalog": "_ow_wait_model_catalog",
+            "warmup_gpt_sovits": "_ow_warmup",
+            "run": "_ow_run_safe"
+          },
+          "saved_originals": [
+            "_ow_original_start_gpt_sovits",
+            "_ow_original_start_backend",
+            "_ow_original_warmup"
+          ]
+        }
+      }
+    },
+    "backend.model_manager": {
+      "source": "backend/model_manager.py",
+      "classes": {
+        "ModelManager": {
+          "bindings": {
+            "_model_root": "_ow_model_root",
+            "_migrate_legacy_model_dirs": "_ow_migrate_legacy_model_dirs",
+            "import_model": "_ow_import_training_output"
+          },
+          "saved_originals": ["_ow_structured_import"]
+        }
+      }
+    }
+  }
+}

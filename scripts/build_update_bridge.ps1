@@ -27,12 +27,15 @@ New-Item -ItemType Directory -Force -Path $scriptsDir | Out-Null
 Copy-Item -LiteralPath (Join-Path $projectRoot "修复更新器.bat") -Destination $packageDir -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot "recover_update.bat") -Destination $packageDir -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot "updater") -Destination $packageDir -Recurse -Force
-Copy-Item -LiteralPath (Join-Path $projectRoot "version.json") -Destination $packageDir -Force
-Copy-Item -LiteralPath (Join-Path $projectRoot "release-layout.json") -Destination $packageDir -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "repair_update_legacy.ps1") -Destination $scriptsDir -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "update_release.ps1") -Destination $scriptsDir -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "update_transaction.ps1") -Destination $scriptsDir -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "process_lifecycle.ps1") -Destination $scriptsDir -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "release_common.ps1") -Destination $scriptsDir -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "legacy-release-layout-v0.1.2.json") -Destination $scriptsDir -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "environment") -Destination $scriptsDir -Recurse -Force
+Get-ChildItem -LiteralPath $packageDir -Recurse -File -Force | Where-Object { $_.Extension -eq ".pyc" } | Remove-Item -Force
+Get-ChildItem -LiteralPath $packageDir -Recurse -Directory -Force | Where-Object { $_.Name -eq "__pycache__" } | Remove-Item -Recurse -Force
 
 # tar.exe 在部分中文 Windows 环境会以 OEM 编码写入中文条目名，固定使用
 # Compress-Archive 以保证“修复更新器.bat”跨工具解压后名称正确。

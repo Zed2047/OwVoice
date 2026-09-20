@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import importlib.util
 import os
 import queue
@@ -23,6 +24,8 @@ from typing import Any
 
 import yaml
 import psutil
+from backend.atomic_json import write_json_atomic
+from backend.logging_support import append_log, rotate_log
 from backend.training_errors import TrainingError
 
 
@@ -33,7 +36,9 @@ class TrainingManager:
     IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
     LANGUAGE_LOCALE = {"zh": "zh-CN", "yue": "zh-HK", "en": "en-US", "ja": "ja-JP", "ko": "ko-KR"}
     DEFAULT_EPOCHS = 8
-    FRONTEND_HEARTBEAT_TIMEOUT = 45.0
+    FRONTEND_HEARTBEAT_TIMEOUT = 90.0
+    DISK_SAFETY_BYTES = 512 * 1024 * 1024
+    TRAINING_MINIMUM_BYTES = 4 * 1024 * 1024 * 1024
 
     def __init__(self, project_dir: str | Path) -> None:
         self.project_dir = Path(project_dir).resolve()
@@ -79,6 +84,125 @@ class TrainingManager:
     def _job_path(self, job_id: str) -> Path:
         return self._job_dir(job_id) / "job.json"
 
+    def _ensure_disk_space(self, path: Path, *, required_bytes: int, stage: str) -> None:
+        free = shutil.disk_usage(path).free
+        if free < required_bytes:
+            required_gb = required_bytes / 1024**3
+            free_gb = free / 1024**3
+            raise TrainingError(
+                f"{stage}前磁盘空间不足：本阶段约需 {required_gb:.1f} GB，"
+                f"当前可用 {free_gb:.1f} GB。请释放空间后重试；现有素材不会被删除。"
+            )
+
+    @staticmethod
+    def _artifact_snapshot(directory: Path, suffix: str) -> dict[str, tuple[int, int]]:
+        if not directory.is_dir():
+            return {}
+        return {
+            str(path.resolve()): (path.stat().st_size, path.stat().st_mtime_ns)
+            for path in directory.glob(f"*{suffix}")
+            if path.is_file()
+        }
+
+    def _select_current_artifact(
+        self,
+        directory: Path,
+        suffix: str,
+        before: dict[str, tuple[int, int]],
+        label: str,
+    ) -> Path:
+        after = self._artifact_snapshot(directory, suffix)
+        changed = [Path(path) for path, identity in after.items() if before.get(path) != identity]
+        if not changed:
+            raise TrainingError(f"当前任务没有产生新的 {label} 权重，未使用旧文件。")
+        if len(changed) != 1:
+            raise TrainingError(f"当前任务产生了多个 {label} 权重，无法确认归属，已停止保存。")
+        if changed[0].stat().st_size <= 0:
+            raise TrainingError(f"当前任务产生的 {label} 权重为空。")
+        return changed[0].resolve()
+
+    @staticmethod
+    def _select_reference(files: list[dict[str, Any]]) -> tuple[Path, str]:
+        for item in files:
+            path = Path(str(item.get("wav_path", ""))).resolve()
+            text = str(item.get("text", "")).strip()
+            if path.is_file() and text:
+                return path, text
+        raise TrainingError("找不到同时具有有效音频和训练文本的参考素材。")
+
+    @staticmethod
+    def _validate_recorded_artifact(path: Path, root: Path, suffix: str, label: str) -> Path:
+        resolved = path.resolve()
+        allowed = root.resolve()
+        if allowed not in resolved.parents or resolved.suffix.casefold() != suffix.casefold():
+            raise TrainingError(f"当前任务记录的 {label} 权重路径无效。")
+        if not resolved.is_file() or resolved.stat().st_size <= 0:
+            raise TrainingError(f"当前任务记录的 {label} 权重不存在或为空。")
+        return resolved
+
+    @staticmethod
+    def _paths_size(paths: list[Path]) -> int:
+        return sum(path.stat().st_size for path in paths if path.is_file())
+
+    @staticmethod
+    def _directory_size(path: Path) -> int:
+        if not path.is_dir():
+            return 0
+        return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _recover_registered_model(self, job: dict[str, Any]) -> dict[str, Any] | None:
+        """识别“模型已入库但 job.json 状态未写回”，避免重复导入。"""
+
+        from backend.model_catalog import load_installed_models
+        from backend.model_manager import ModelManager
+
+        model_id = str(job.get("model_id", ""))
+        registered = next(
+            (item for item in load_installed_models(self.project_dir) if item.id == model_id),
+            None,
+        )
+        if registered is None:
+            return None
+        manager = ModelManager(self.project_dir)
+        model_root = manager._model_root(registered)
+        try:
+            metadata = json.loads((model_root / "model.json").read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+            raise TrainingError(f"模型 ID {model_id} 已存在，但元数据无法验证。") from exc
+        source = metadata.get("training_source") if isinstance(metadata, dict) else None
+        artifacts = dict(job.get("artifacts") or {})
+        if not isinstance(source, dict) or str(source.get("job_id", "")) != str(job.get("id", "")):
+            raise TrainingError(f"模型 ID {model_id} 已存在，但不属于当前训练任务，已停止保存。")
+        for key in ("gpt", "sovits"):
+            path = Path(str(artifacts.get(key, "")))
+            if not path.is_file() or self._sha256(path) != str(source.get(f"{key}_sha256", "")):
+                raise TrainingError(f"已入库模型与当前任务的 {key.upper()} 权重身份不一致，已停止保存。")
+            field = "gpt_model" if key == "gpt" else "sovits_model"
+            installed_path = (model_root / str(metadata.get(field, ""))).resolve()
+            if model_root.resolve() not in installed_path.parents or not installed_path.is_file() or self._sha256(installed_path) != str(source.get(f"{key}_sha256", "")):
+                raise TrainingError(f"已入库模型的 {key.upper()} 权重文件身份不一致，已停止保存。")
+        result = {**registered.to_dict(), **metadata, "installed": True, "source": "local"}
+        job.update(
+            {
+                "status": "registered",
+                "stage": "已保存",
+                "progress": 100,
+                "message": "已确认模型此前已经保存，无需重复导入。",
+                "model": result,
+                "updated_at": self._now(),
+            }
+        )
+        self._save(job)
+        return self._public(job)
+
     def _load(self, job_id: str) -> dict[str, Any]:
         try:
             value = json.loads(self._job_path(job_id).read_text(encoding="utf-8"))
@@ -89,9 +213,15 @@ class TrainingManager:
         return value
 
     def _save(self, job: dict[str, Any]) -> None:
-        path = self._job_path(str(job["id"]))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(job, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        job_id = str(job.get("id", ""))
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}", job_id):
+            raise TrainingError("训练任务 ID 无效。")
+        status = str(job.get("status", ""))
+        if status not in {"draft", "transcribing", "preparing", "prepared", "running", "cancelling", "interrupted", "failed", "completed", "registered"}:
+            raise TrainingError("训练任务状态无效。")
+        if not isinstance(job.get("files"), list):
+            raise TrainingError("训练任务素材清单无效。")
+        write_json_atomic(self._job_path(job_id), job)
 
     def _recover_interrupted_jobs(self) -> None:
         """服务重启后清理失联的运行状态，避免界面永久停在加载中。"""
@@ -107,11 +237,12 @@ class TrainingManager:
             job["stage"] = "任务已中断"
             job["message"] = "上次任务未完成，残留进程已停止，可以重新开始。"
             job["error"] = "服务重启或程序异常退出。"
+            job["stop_reason"] = "service_restart"
             job["process_pid"] = None
             job["updated_at"] = self._now()
             try:
-                job_path.write_text(json.dumps(job, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            except OSError:
+                self._save(job)
+            except (OSError, TrainingError):
                 continue
 
     def _watchdog_loop(self) -> None:
@@ -221,6 +352,26 @@ class TrainingManager:
             self._save(job)
             return self._public(job)
 
+    def _set_cancelled_status(self, job_id: str, *, stage: str, message: str) -> dict[str, Any]:
+        """写入取消结果，但不得覆盖看门狗已经记录的具体中断原因。"""
+
+        with self._lock:
+            job = self._load(job_id)
+            if str(job.get("stop_reason", "")) == "heartbeat_timeout":
+                return self._public(job)
+            job.update(
+                {
+                    "status": "interrupted",
+                    "stage": stage,
+                    "message": message,
+                    "error": "",
+                    "stop_reason": str(job.get("stop_reason", "")) or "user_cancel",
+                    "updated_at": self._now(),
+                }
+            )
+            self._save(job)
+            return self._public(job)
+
     def create_job(
         self,
         name: str,
@@ -238,6 +389,15 @@ class TrainingManager:
             raise TrainingError("请至少选择一个音频文件。")
         if len(source_paths) > 200:
             raise TrainingError("一次最多上传 200 个音频文件。")
+
+        source_files = [Path(value).expanduser().resolve() for value in source_paths]
+        avatar_source = Path(avatar_path).expanduser().resolve() if avatar_path else None
+        estimated_input = self._paths_size(source_files + ([avatar_source] if avatar_source else []))
+        self._ensure_disk_space(
+            self.project_dir,
+            required_bytes=estimated_input * 2 + self.DISK_SAFETY_BYTES,
+            stage="导入素材",
+        )
 
         job_id = uuid.uuid4().hex[:12]
         job_dir = self._job_dir(job_id)
@@ -334,8 +494,11 @@ class TrainingManager:
             return path
 
     def latest_recoverable_job(self) -> dict[str, Any] | None:
-        """返回最近一次可继续查看的任务，供前端异常退出后恢复。"""
-        ignored_statuses = {"registered"}
+        """仅在最近一次训练活动尚未保存时恢复该任务。
+
+        最新任务已经保存后不能继续向前寻找更早的未完成任务，否则重新
+        进入训练页会把用户带回陈旧素材，造成这些素材属于当前训练的错觉。
+        """
         candidates: list[tuple[str, dict[str, Any]]] = []
         with self._lock:
             for job_path in self.jobs_root.glob("*/job.json"):
@@ -343,12 +506,14 @@ class TrainingManager:
                     job = json.loads(job_path.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
                     continue
-                if not isinstance(job, dict) or str(job.get("status", "")) in ignored_statuses:
+                if not isinstance(job, dict):
                     continue
                 candidates.append((str(job.get("updated_at", "")), job))
         if not candidates:
             return None
         _updated_at, job = max(candidates, key=lambda item: item[0])
+        if str(job.get("status", "")) == "registered":
+            return None
         return self._public(job)
 
     def heartbeat(self, session_id: str, job_id: str | None = None) -> dict[str, Any]:
@@ -415,9 +580,10 @@ class TrainingManager:
                 event.set()
                 job.update({
                     "status": "interrupted",
-                    "stage": "前端已退出",
-                    "message": "前端异常退出，训练已自动停止。",
+                    "stage": "连接中断，训练已停止",
+                    "message": "OwVoice 前端超过 90 秒没有响应，后端已停止训练；素材和准备结果仍保留。",
                     "error": "前端心跳超时。",
+                    "stop_reason": "heartbeat_timeout",
                     "process_pid": None,
                     "updated_at": self._now(),
                 })
@@ -476,6 +642,13 @@ class TrainingManager:
             existing_files = list(job.get("files", []))
             if len(existing_files) + len(source_paths) > 200:
                 raise TrainingError("训练任务最多包含 200 个音频文件。")
+
+            new_sources = [Path(value).expanduser().resolve() for value in source_paths]
+            self._ensure_disk_space(
+                self._job_dir(job_id),
+                required_bytes=self._paths_size(new_sources) * 2 + self.DISK_SAFETY_BYTES,
+                stage="导入素材",
+            )
 
             raw_dir = self._job_dir(job_id) / "raw"
             raw_dir.mkdir(parents=True, exist_ok=True)
@@ -640,6 +813,12 @@ class TrainingManager:
                 raise TrainingError("提交的文本和音频列表不一致，请刷新后重试。")
             if any(not by_name[str(item.get("name"))] for item in files):
                 raise TrainingError("还有音频没有训练文本，请补充后再继续。")
+            raw_size = self._paths_size([Path(str(item.get("raw_path", ""))) for item in files])
+            self._ensure_disk_space(
+                self._job_dir(job_id),
+                required_bytes=raw_size * 4 + self.DISK_SAFETY_BYTES,
+                stage="数据准备",
+            )
             for item in files:
                 item["text"] = by_name[str(item.get("name"))]
                 item["wav_path"] = ""
@@ -689,6 +868,7 @@ class TrainingManager:
                 "progress": progress,
                 "message": message,
                 "error": "",
+                "stop_reason": "",
                 "updated_at": self._now(),
                 "session_id": str(session_id or ""),
                 "last_heartbeat": self._now(),
@@ -715,6 +895,16 @@ class TrainingManager:
         )
 
     def start_prepare(self, job_id: str, session_id: str = "") -> dict[str, Any]:
+        with self._lock:
+            job = self._load(job_id)
+            raw_size = self._paths_size(
+                [Path(str(item.get("raw_path", ""))) for item in job.get("files", [])]
+            )
+            self._ensure_disk_space(
+                self._job_dir(job_id),
+                required_bytes=raw_size * 4 + self.DISK_SAFETY_BYTES,
+                stage="数据准备",
+            )
         return self._start_thread(
             job_id,
             self._prepare_worker,
@@ -733,6 +923,14 @@ class TrainingManager:
             data_ready = self._dataset_ready(job)
             if status not in {"prepared", "failed", "interrupted"} or not data_ready:
                 raise TrainingError("训练数据未准备完成，请先重新准备数据。")
+            self._ensure_disk_space(
+                self._job_dir(job_id),
+                required_bytes=max(
+                    self.TRAINING_MINIMUM_BYTES,
+                    self._directory_size(self._job_dir(job_id)) * 2 + self.DISK_SAFETY_BYTES,
+                ),
+                stage="模型训练",
+            )
         return self._start_thread(
             job_id,
             self._training_worker,
@@ -754,7 +952,12 @@ class TrainingManager:
                 raise TrainingError("当前训练任务属于其他前端会话，不能停止。")
             event.set()
             process = self._processes.get(job_id)
-            job.update({"status": "cancelling", "message": "正在停止当前任务……", "updated_at": self._now()})
+            job.update({
+                "status": "cancelling",
+                "message": "正在停止当前任务……",
+                "stop_reason": "user_cancel",
+                "updated_at": self._now(),
+            })
             self._save(job)
             result = self._public(job)
         if process and process.poll() is None:
@@ -769,8 +972,102 @@ class TrainingManager:
 
     def _log(self, job_id: str, line: str) -> None:
         path = self._job_dir(job_id) / "training.log"
+        existed = path.exists()
+        rotate_log(path, max_bytes=20 * 1024 * 1024, backup_count=2)
+        if not existed or not path.exists():
+            append_log(
+                path,
+                line,
+                module="training",
+                level="INFO",
+                max_bytes=20 * 1024 * 1024,
+                backup_count=2,
+            )
+            return
         with path.open("a", encoding="utf-8", errors="replace") as handle:
             handle.write(line.rstrip() + "\n")
+
+    def _update_training_progress_from_output(self, job_id: str, line: str) -> None:
+        """把 epoch 内进度折算为阶段总进度，忽略训练前的数据扫描进度。"""
+
+        percent_match = re.search(r"(?<!\d)(\d{1,3})%\|", line)
+        epoch_match = re.search(r"Train Epoch:\s*(\d+)", line)
+        if percent_match is None and epoch_match is None:
+            return
+        with self._lock:
+            job = self._load(job_id)
+            if str(job.get("status", "")) != "running":
+                return
+            stage = str(job.get("stage", ""))
+            if "SoVITS" in stage:
+                label = "SoVITS"
+            elif "GPT" in stage:
+                label = "GPT"
+            else:
+                return
+            total_epochs = max(
+                1,
+                int(job.get("stage_epochs", self.DEFAULT_EPOCHS) or self.DEFAULT_EPOCHS),
+            )
+            epoch = max(0, int(job.get("stage_epoch", 0) or 0))
+            if epoch_match is not None and label == "SoVITS":
+                epoch = max(1, min(total_epochs, int(epoch_match.group(1))))
+            # s2_train 在真正进入 epoch 前会输出一次数据采样 tqdm。没有
+            # Train Epoch 上下文时，该 100% 不能作为 SoVITS 训练进度。
+            if epoch <= 0:
+                return
+            epoch_percent = (
+                min(100, int(percent_match.group(1)))
+                if percent_match is not None
+                else 0
+            )
+            percent = min(
+                100,
+                round(((epoch - 1) * 100 + epoch_percent) / total_epochs),
+            )
+            if label == "SoVITS":
+                progress = min(83, 72 + round(percent * 0.12))
+            else:
+                progress = min(99, 84 + round(percent * 0.15))
+            current_progress = int(job.get("progress", 0) or 0)
+            current_stage_progress = int(job.get("stage_progress", -1) or 0)
+            current_stage_epoch = int(job.get("stage_epoch", 0) or 0)
+            if (
+                progress <= current_progress
+                and percent <= current_stage_progress
+                and epoch <= current_stage_epoch
+            ):
+                return
+            job["progress"] = max(current_progress, progress)
+            job["stage_progress"] = percent
+            job["stage_name"] = label
+            job["stage_epoch"] = epoch
+            job["stage_epochs"] = total_epochs
+            job["epoch_progress"] = epoch_percent
+            if percent >= 100:
+                if label == "SoVITS":
+                    job["message"] = (
+                        "SoVITS 阶段已到 100%，正在保存阶段模型并切换到 GPT；"
+                        f"整个训练尚未完成（总体进度 {job['progress']}%）。"
+                    )
+                else:
+                    job["message"] = (
+                        "GPT 阶段已到 100%，正在保存训练结果；"
+                        f"整个训练尚未完成（总体进度 {job['progress']}%）。"
+                    )
+            else:
+                job["message"] = (
+                    f"正在训练 {label}：第 {epoch}/{total_epochs} 轮，"
+                    f"本轮 {epoch_percent}%，阶段总进度 {percent}%，"
+                    f"总体进度 {job['progress']}%。"
+                )
+            job["last_output_at"] = self._now()
+            job["updated_at"] = self._now()
+            self._save(job)
+
+    def _record_process_output(self, job_id: str, line: str) -> None:
+        self._log(job_id, line)
+        self._update_training_progress_from_output(job_id, line)
 
     def log_text(self, job_id: str) -> str:
         """返回当前任务日志；限制体积，避免超长日志拖慢界面。"""
@@ -919,15 +1216,28 @@ class TrainingManager:
         output: queue.Queue[str] = queue.Queue()
 
         def read_output() -> None:
-            for line in process.stdout:
-                output.put(line)
+            # tqdm 使用回车而不是换行刷新百分比。逐字符识别 \r/\n，才能在训练
+            # 进行中及时更新界面，而不是等子进程退出后才一次性看到最终进度。
+            buffer: list[str] = []
+            while True:
+                character = process.stdout.read(1)
+                if not character:
+                    break
+                if character in {"\r", "\n"}:
+                    if buffer:
+                        output.put("".join(buffer) + "\n")
+                        buffer.clear()
+                    continue
+                buffer.append(character)
+            if buffer:
+                output.put("".join(buffer) + "\n")
 
         reader = threading.Thread(target=read_output, daemon=True, name=f"owvoice-output-{job_id}")
         reader.start()
         while process.poll() is None:
             try:
                 while True:
-                    self._log(job_id, output.get_nowait())
+                    self._record_process_output(job_id, output.get_nowait())
             except queue.Empty:
                 pass
             if cancel.is_set():
@@ -937,7 +1247,7 @@ class TrainingManager:
         reader.join(timeout=3)
         try:
             while True:
-                self._log(job_id, output.get_nowait())
+                self._record_process_output(job_id, output.get_nowait())
         except queue.Empty:
             pass
         code = process.poll()
@@ -1003,7 +1313,7 @@ class TrainingManager:
             self._set_status(job_id, status="draft", stage="等待校对", progress=30, message="自动识别完成，请检查文本并修改错误。")
         except Exception as exc:
             if cancel.is_set():
-                self._set_status(job_id, status="interrupted", stage="识别已停止", message="识别已停止，可以继续识别。", error="")
+                self._set_cancelled_status(job_id, stage="识别已停止", message="识别已停止；素材仍保留，可重新开始识别阶段。")
             else:
                 self._set_status(job_id, status="failed", stage="文本识别失败", message=str(exc), error=str(exc))
         finally:
@@ -1103,12 +1413,12 @@ class TrainingManager:
         except subprocess.CalledProcessError as exc:
             message = (exc.stderr or str(exc)).strip()
             if cancel.is_set():
-                self._set_status(job_id, status="interrupted", stage="准备已停止", message="数据准备已停止，可以继续准备。", error="")
+                self._set_cancelled_status(job_id, stage="准备已停止", message="数据准备已停止；素材仍保留，可重新开始准备阶段。")
             else:
                 self._set_status(job_id, status="failed", stage="音频处理失败", message=message, error=message)
         except Exception as exc:
             if cancel.is_set():
-                self._set_status(job_id, status="interrupted", stage="准备已停止", message="数据准备已停止，可以继续准备。", error="")
+                self._set_cancelled_status(job_id, stage="准备已停止", message="数据准备已停止；素材仍保留，可重新开始准备阶段。")
             else:
                 self._set_status(job_id, status="failed", stage="数据准备失败", message=str(exc), error=str(exc))
         finally:
@@ -1138,7 +1448,8 @@ class TrainingManager:
                 "pretrained_s2D": str(pretrained_root / "v2Pro" / "s2Dv2Pro.pth"),
                 "if_save_latest": False,
                 "if_save_every_weights": True,
-                "save_every_epoch": 1,
+                # 只在最终 epoch 导出一次可发布权重，确保本任务产物差集唯一。
+                "save_every_epoch": self.DEFAULT_EPOCHS,
                 "gpu_numbers": "0",
                 "fp16_run": use_cuda,
                 "grad_ckpt": False,
@@ -1151,6 +1462,14 @@ class TrainingManager:
             gpt_weight_dir = self.gsv_root / "GPT_weights_v2Pro"
             sovits_weight_dir.mkdir(parents=True, exist_ok=True)
             gpt_weight_dir.mkdir(parents=True, exist_ok=True)
+            sovits_before = self._artifact_snapshot(sovits_weight_dir, ".pth")
+            gpt_before = self._artifact_snapshot(gpt_weight_dir, ".ckpt")
+            job["artifacts"] = {
+                key: value
+                for key, value in dict(job.get("artifacts") or {}).items()
+                if key not in {"gpt", "sovits"}
+            }
+            self._save(job)
             s2_data["data"]["exp_dir"] = str(exp_dir)
             s2_data["model"]["version"] = version
             s2_data["s2_ckpt_dir"] = str(exp_dir)
@@ -1172,11 +1491,17 @@ class TrainingManager:
             # 统一训练子进程输出编码，避免 Windows 控制台字符在训练日志中乱码。
             env["PYTHONUTF8"] = "1"
             env["PYTHONIOENCODING"] = "utf-8"
-            self._set_status(job_id, status="running", stage="正在训练 SoVITS", progress=72, message="正在训练声音生成模型，期间界面可以最小化。")
+            self._set_status(job_id, status="running", stage="正在训练 SoVITS", progress=72, stage_name="SoVITS", stage_progress=0, stage_epoch=0, stage_epochs=self.DEFAULT_EPOCHS, epoch_progress=0, message="正在启动 SoVITS 训练；总体进度 72%，期间界面可以最小化。")
             self._run_process(job_id, [str(self.python_exe), "-s", "GPT_SoVITS/s2_train.py", "--config", str(s2_tmp)], env, cancel)
+            sovits_artifact = self._select_current_artifact(
+                sovits_weight_dir, ".pth", sovits_before, "SoVITS"
+            )
+            job = self._load(job_id)
+            job.setdefault("artifacts", {})["sovits"] = str(sovits_artifact)
+            self._save(job)
 
             s1_data = yaml.safe_load((self.gsv_root / "GPT_SoVITS" / "configs" / "s1longer-v2.yaml").read_text(encoding="utf-8"))
-            s1_data["train"].update({"epochs": self.DEFAULT_EPOCHS, "batch_size": 1, "save_every_n_epoch": 1, "precision": "16-mixed" if use_cuda else "32-true", "if_save_latest": False, "if_save_every_weights": True, "if_dpo": False})
+            s1_data["train"].update({"epochs": self.DEFAULT_EPOCHS, "batch_size": 1, "save_every_n_epoch": self.DEFAULT_EPOCHS, "precision": "16-mixed" if use_cuda else "32-true", "if_save_latest": False, "if_save_every_weights": True, "if_dpo": False})
             # Windows 下多进程 DataLoader 容易在语义训练阶段卡在 worker 启动或预取。
             # 语义训练数据量通常很小，单进程加载更稳定，且不会阻塞 OwVoice 界面。
             s1_data.setdefault("data", {})["num_workers"] = 0
@@ -1188,12 +1513,28 @@ class TrainingManager:
             s1_data["train"]["exp_name"] = job["model_id"]
             s1_tmp = self._job_dir(job_id) / "tmp_s1.yaml"
             s1_tmp.write_text(yaml.safe_dump(s1_data, allow_unicode=True, sort_keys=False), encoding="utf-8")
-            self._set_status(job_id, stage="正在训练 GPT", progress=84, message="正在训练文字到语音的语义模型。")
+            self._set_status(job_id, stage="正在训练 GPT", progress=84, stage_name="GPT", stage_progress=0, stage_epoch=0, stage_epochs=self.DEFAULT_EPOCHS, epoch_progress=0, message="SoVITS 阶段已完成，正在训练 GPT 语义模型；总体进度 84%，整个训练尚未完成。")
             self._run_process(job_id, [str(self.python_exe), "-s", "GPT_SoVITS/s1_train.py", "--config_file", str(s1_tmp)], env, cancel)
-            self._set_status(job_id, status="completed", stage="训练完成", progress=100, message="训练完成，请点击保存到本地模型库。")
+            gpt_artifact = self._select_current_artifact(
+                gpt_weight_dir, ".ckpt", gpt_before, "GPT"
+            )
+            job = self._load(job_id)
+            job.setdefault("artifacts", {})["gpt"] = str(gpt_artifact)
+            self._save(job)
+            self._set_status(job_id, status="completed", stage="训练完成", progress=100, stage_name="全部", stage_progress=100, message="全部训练已完成，请点击保存到本地模型库。")
         except Exception as exc:
+            try:
+                failed_job = self._load(job_id)
+                failed_job["artifacts"] = {
+                    key: value
+                    for key, value in dict(failed_job.get("artifacts") or {}).items()
+                    if key not in {"gpt", "sovits"}
+                }
+                self._save(failed_job)
+            except (OSError, TrainingError):
+                pass
             if cancel.is_set():
-                self._set_status(job_id, status="interrupted", stage="训练已停止", message="训练已停止，可以继续训练。", error="")
+                self._set_cancelled_status(job_id, stage="训练已停止", message="训练已停止；素材和准备结果仍保留，可重新开始模型训练阶段。")
             else:
                 self._set_status(job_id, status="failed", stage="训练失败", message=str(exc), error=str(exc))
         finally:
@@ -1202,56 +1543,95 @@ class TrainingManager:
     def finalize(self, job_id: str) -> dict[str, Any]:
         with self._lock:
             job = self._load(job_id)
+            if job.get("status") == "registered":
+                return self._public(job)
+            recovered = self._recover_registered_model(job)
+            if recovered is not None:
+                return recovered
             if job.get("status") != "completed":
                 raise TrainingError("训练尚未完成，不能保存模型。")
             job_dir = self._job_dir(job_id)
             exp_name = job["model_id"]
-            gpt_candidates = sorted((self.gsv_root / "GPT_weights_v2Pro").glob(f"*{exp_name}*.ckpt"), key=lambda p: p.stat().st_mtime, reverse=True)
-            sovits_candidates = sorted((self.gsv_root / "SoVITS_weights_v2Pro").glob(f"*{exp_name}*.pth"), key=lambda p: p.stat().st_mtime, reverse=True)
-            if not gpt_candidates or not sovits_candidates:
-                raise TrainingError("找不到当前任务对应的训练权重，未保存其他任务的权重。请点击“训练日志”查看详情。")
+            artifacts = dict(job.get("artifacts") or {})
+            gpt_source = self._validate_recorded_artifact(
+                Path(str(artifacts.get("gpt", ""))),
+                self.gsv_root / "GPT_weights_v2Pro",
+                ".ckpt",
+                "GPT",
+            )
+            sovits_source = self._validate_recorded_artifact(
+                Path(str(artifacts.get("sovits", ""))),
+                self.gsv_root / "SoVITS_weights_v2Pro",
+                ".pth",
+                "SoVITS",
+            )
+            reference, prompt_text = self._select_reference(list(job.get("files", [])))
+            avatar = Path(str(job.get("avatar_path", ""))).resolve()
+            save_size = gpt_source.stat().st_size + sovits_source.stat().st_size + reference.stat().st_size
+            if avatar.is_file() and job_dir in avatar.parents:
+                save_size += avatar.stat().st_size
+            self._ensure_disk_space(
+                job_dir,
+                required_bytes=save_size * 2 + self.DISK_SAFETY_BYTES,
+                stage="保存模型",
+            )
+            gpt_hash = self._sha256(gpt_source)
+            sovits_hash = self._sha256(sovits_source)
+            training_source = {
+                "job_id": job_id,
+                "gpt_sha256": gpt_hash,
+                "sovits_sha256": sovits_hash,
+            }
             package = job_dir / "model_package"
             if package.exists():
-                shutil.rmtree(package)
-            package.mkdir()
-            gpt_target = package / "GPT_weights" / "model.ckpt"
-            sovits_target = package / "SoVITS_weights" / "model.pth"
-            gpt_target.parent.mkdir()
-            sovits_target.parent.mkdir()
-            shutil.copy2(gpt_candidates[0], gpt_target)
-            shutil.copy2(sovits_candidates[0], sovits_target)
-            reference = next((Path(str(item.get("wav_path"))) for item in job.get("files", []) if Path(str(item.get("wav_path", ""))).is_file()), None)
-            if reference is None:
-                raise TrainingError("找不到训练参考音频。")
-            reference_target = package / "reference.wav"
-            shutil.copy2(reference, reference_target)
-            avatar = Path(str(job.get("avatar_path", ""))).resolve()
-            avatar_filename = ""
-            if avatar.is_file() and job_dir in avatar.parents:
-                avatar_filename = f"avatar{avatar.suffix.lower()}"
-                shutil.copy2(avatar, package / avatar_filename)
-            first_text = str(job.get("files", [{}])[0].get("text", ""))
-            metadata = {
-                "id": exp_name,
-                "name": job["name"],
-                "display_name": job["name"],
-                "version": "0.1.0",
-                "locale": self.LANGUAGE_LOCALE[job["language"]],
-                "mode": "finetuned",
-                "gpt_model": "GPT_weights/model.ckpt",
-                "sovits_model": "SoVITS_weights/model.pth",
-                "reference_audio": "reference.wav",
-                "avatar": avatar_filename,
-                "prompt_text": first_text,
-                "prompt_language": job["language"],
-                "enabled": True,
-                "license_note": "用户本地训练模型；请确认训练音频和声音素材具有合法授权。",
-            }
-            (package / "model.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                try:
+                    existing_metadata = json.loads((package / "model.json").read_text(encoding="utf-8-sig"))
+                except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+                    raise TrainingError("任务内已有模型恢复包但无法验证，已保留原目录。") from exc
+                if not isinstance(existing_metadata, dict) or existing_metadata.get("training_source") != training_source:
+                    raise TrainingError("任务内已有模型恢复包身份不一致，已保留原目录。")
+            else:
+                staging = job_dir / f".model-package-{uuid.uuid4().hex}.tmp"
+                try:
+                    staging.mkdir()
+                    gpt_target = staging / "GPT_weights" / "model.ckpt"
+                    sovits_target = staging / "SoVITS_weights" / "model.pth"
+                    gpt_target.parent.mkdir()
+                    sovits_target.parent.mkdir()
+                    shutil.copy2(gpt_source, gpt_target)
+                    shutil.copy2(sovits_source, sovits_target)
+                    reference_target = staging / "reference.wav"
+                    shutil.copy2(reference, reference_target)
+                    avatar_filename = ""
+                    if avatar.is_file() and job_dir in avatar.parents:
+                        avatar_filename = f"avatar{avatar.suffix.lower()}"
+                        shutil.copy2(avatar, staging / avatar_filename)
+                    metadata = {
+                        "id": exp_name,
+                        "name": job["name"],
+                        "display_name": job["name"],
+                        "version": "0.1.0",
+                        "locale": self.LANGUAGE_LOCALE[job["language"]],
+                        "mode": "finetuned",
+                        "gpt_model": "GPT_weights/model.ckpt",
+                        "sovits_model": "SoVITS_weights/model.pth",
+                        "reference_audio": "reference.wav",
+                        "avatar": avatar_filename,
+                        "prompt_text": prompt_text,
+                        "prompt_language": job["language"],
+                        "enabled": True,
+                        "training_source": training_source,
+                        "license_note": "用户本地训练模型；请确认训练音频和声音素材具有合法授权。",
+                    }
+                    write_json_atomic(staging / "model.json", metadata)
+                    staging.rename(package)
+                except Exception:
+                    shutil.rmtree(staging, ignore_errors=True)
+                    raise
             from backend.model_manager import ModelManager
 
             model = ModelManager(self.project_dir).import_model(package)
-            job["artifacts"] = {"package": str(package), "gpt": str(gpt_candidates[0]), "sovits": str(sovits_candidates[0])}
+            job["artifacts"] = {"package": str(package), "gpt": str(gpt_source), "sovits": str(sovits_source)}
             job.update({"status": "registered", "stage": "已保存", "progress": 100, "message": "模型已保存。", "model": model, "updated_at": self._now()})
             self._save(job)
             return self._public(job)

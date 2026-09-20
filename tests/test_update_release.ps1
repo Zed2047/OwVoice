@@ -16,12 +16,16 @@ $brokenPackage = Join-Path $serverRoot "OwVoice-v0.2.1"
 $brokenArchive = Join-Path $serverRoot "OwVoice-v0.2.1.zip"
 $directories = @(
     "backend", "frontend", "assets\avatars", "GPT-SoVITS\GPT_SoVITS\pretrained_models",
-    "scripts", "tools", "_internal", "config", "data\models", "data\training\jobs\job-001", ".venv", ".runtime"
+    "scripts", "tools", "_internal", "config", "data\models\voice-001", "data\training\jobs\job-001", "output", ".venv", ".runtime"
 )
 foreach ($directory in $directories) { New-Item -ItemType Directory -Force -Path (Join-Path $target $directory) | Out-Null }
 [System.IO.File]::WriteAllText((Join-Path $target ".venv\keep.txt"), "venv")
 [System.IO.File]::WriteAllText((Join-Path $target ".runtime\keep.txt"), "runtime")
 [System.IO.File]::WriteAllText((Join-Path $target "data\training\jobs\job-001\job.json"), "training")
+[System.IO.File]::WriteAllText((Join-Path $target "data\models\installed-models.json"), "registry")
+[System.IO.File]::WriteAllText((Join-Path $target "data\models\voice-001\model.json"), "metadata")
+[System.IO.File]::WriteAllText((Join-Path $target "data\models\voice-001\weights.pth"), "weights")
+[System.IO.File]::WriteAllText((Join-Path $target "output\result.wav"), "audio")
 [System.IO.File]::WriteAllText((Join-Path $target "assets\avatars\keep.txt"), "avatar")
 [System.IO.File]::WriteAllText((Join-Path $target "GPT-SoVITS\GPT_SoVITS\pretrained_models\keep.bin"), "model")
 [System.IO.File]::WriteAllText((Join-Path $target "config\voices.local.json"), "local-config")
@@ -33,6 +37,7 @@ foreach ($directory in $directories) { New-Item -ItemType Directory -Force -Path
 Copy-Item -LiteralPath (Join-Path $projectRoot "release-layout.json") -Destination $target
 Copy-Item -LiteralPath (Join-Path $projectRoot "updater") -Destination $target -Recurse
 Copy-Item -LiteralPath (Join-Path $projectRoot "scripts\update_transaction.ps1") -Destination (Join-Path $target "scripts") -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot "scripts\process_lifecycle.ps1") -Destination (Join-Path $target "scripts") -Force
 
 foreach ($directory in @("backend", "frontend", "assets\avatars", "GPT-SoVITS\GPT_SoVITS\pretrained_models", "scripts", "tools\uv", "_internal", "config")) {
     New-Item -ItemType Directory -Force -Path (Join-Path $package $directory) | Out-Null
@@ -42,7 +47,7 @@ foreach ($directory in @("backend", "frontend", "assets\avatars", "GPT-SoVITS\GP
 [System.IO.File]::WriteAllText((Join-Path $package "GPT-SoVITS\new.py"), "new")
 [System.IO.File]::WriteAllText((Join-Path $package "tools\uv\uv.exe"), "new-uv")
 [System.IO.File]::WriteAllText((Join-Path $package "config\voices.example.json"), "example")
-foreach ($file in @("OwVoice.exe", "requirements-cpu.txt", "requirements-gpu.txt", "requirements-training.txt", "BUILD_INFO.json", "pyproject.toml", "uv.lock", "resource-lock.json", "setup.bat", "README.md", "CHANGELOG.md", "MODEL_PACKAGE_SPEC.md", "LICENSE", "THIRD_PARTY_NOTICES.md")) {
+foreach ($file in @("OwVoice.exe", "requirements-cpu.txt", "requirements-gpu.txt", "requirements-training.txt", "BUILD_INFO.json", "pyproject.toml", "uv.lock", "resource-lock.json", "environment-spec.json", "dependency-contract.json", "setup.bat", "README.md", "CHANGELOG.md", "MODEL_PACKAGE_SPEC.md", "LICENSE", "THIRD_PARTY_NOTICES.md")) {
     [System.IO.File]::WriteAllText((Join-Path $package $file), "new")
 }
 [System.IO.File]::WriteAllText((Join-Path $package "version.json"), '{"version":"0.2.0","channel":"stable","updateSchema":2}')
@@ -50,6 +55,7 @@ Copy-Item -LiteralPath (Join-Path $projectRoot "release-layout.json") -Destinati
 Copy-Item -LiteralPath (Join-Path $projectRoot "recover_update.bat") -Destination $package
 Copy-Item -LiteralPath (Join-Path $projectRoot "updater") -Destination $package -Recurse
 Copy-Item -LiteralPath (Join-Path $projectRoot "scripts\update_transaction.ps1") -Destination (Join-Path $package "scripts") -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot "scripts\process_lifecycle.ps1") -Destination (Join-Path $package "scripts") -Force
 $layout = Get-Content -LiteralPath (Join-Path $package "release-layout.json") -Raw -Encoding UTF8 | ConvertFrom-Json
 $managedItems = @($layout.managedItems | ForEach-Object { ([string]$_).Replace("\", "/").Trim("/") })
 $preservePaths = @($layout.preservePaths | ForEach-Object { ([string]$_).Replace("\", "/").Trim("/") })
@@ -84,12 +90,19 @@ $pythonExe = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $server = Start-Process -FilePath $pythonExe -ArgumentList @("-m", "http.server", "$port", "--bind", "127.0.0.1", "--directory", $serverRoot) -WindowStyle Hidden -PassThru
 try {
     Start-Sleep -Milliseconds 750
-    & (Join-Path $projectRoot "scripts\update_release.ps1") -DownloadUrl "http://127.0.0.1:$port/OwVoice-v0.2.0.zip" -Sha256 $sha256 -ExpectedSize $archiveSize -TargetDirectory $target -NoRestart
+    $localArchive = Join-Path $target ".cache\updates\downloads\OwVoice-v0.2.0.zip"
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $localArchive) | Out-Null
+    Copy-Item -LiteralPath $archive -Destination $localArchive -Force
+    & (Join-Path $projectRoot "scripts\update_release.ps1") -LocalArchivePath $localArchive -Sha256 $sha256 -ExpectedSize $archiveSize -TargetDirectory $target -NoRestart
 
     $checks = [ordered]@{
         venv = ((Get-Content -LiteralPath (Join-Path $target ".venv\keep.txt") -Raw) -eq "venv")
         runtime = ((Get-Content -LiteralPath (Join-Path $target ".runtime\keep.txt") -Raw) -eq "runtime")
         training = ((Get-Content -LiteralPath (Join-Path $target "data\training\jobs\job-001\job.json") -Raw) -eq "training")
+        registry = ((Get-Content -LiteralPath (Join-Path $target "data\models\installed-models.json") -Raw) -eq "registry")
+        modelMetadata = ((Get-Content -LiteralPath (Join-Path $target "data\models\voice-001\model.json") -Raw) -eq "metadata")
+        modelWeights = ((Get-Content -LiteralPath (Join-Path $target "data\models\voice-001\weights.pth") -Raw) -eq "weights")
+        output = ((Get-Content -LiteralPath (Join-Path $target "output\result.wav") -Raw) -eq "audio")
         avatar = ((Get-Content -LiteralPath (Join-Path $target "assets\avatars\keep.txt") -Raw) -eq "avatar")
         model = ((Get-Content -LiteralPath (Join-Path $target "GPT-SoVITS\GPT_SoVITS\pretrained_models\keep.bin") -Raw) -eq "model")
         localConfig = ((Get-Content -LiteralPath (Join-Path $target "config\voices.local.json") -Raw) -eq "local-config")
@@ -118,7 +131,7 @@ try {
         throw "更新失败回滚后原有 README.md 未恢复。"
     }
 
-    foreach ($failurePoint in @("after_backup", "after_first_install", "after_install", "after_preserve", "after_verify")) {
+    foreach ($failurePoint in @("after_user_data_backup", "after_backup", "after_first_install", "after_install", "after_preserve", "after_verify")) {
         $failureTarget = Join-Path $resolvedTestRoot ("failure-" + $failurePoint)
         Copy-Item -LiteralPath $targetTemplate -Destination $failureTarget -Recurse
         $failureObserved = $false
@@ -137,7 +150,11 @@ try {
         if ((Get-Content -LiteralPath (Join-Path $failureTarget "backend\old.txt") -Raw) -ne "old" -or
             (Test-Path -LiteralPath (Join-Path $failureTarget "backend\new.txt")) -or
             (Get-Content -LiteralPath (Join-Path $failureTarget "assets\avatars\keep.txt") -Raw) -ne "avatar" -or
-            (Get-Content -LiteralPath (Join-Path $failureTarget "config\voices.local.json") -Raw) -ne "local-config") {
+            (Get-Content -LiteralPath (Join-Path $failureTarget "config\voices.local.json") -Raw) -ne "local-config" -or
+            (Get-Content -LiteralPath (Join-Path $failureTarget "data\models\installed-models.json") -Raw) -ne "registry" -or
+            (Get-Content -LiteralPath (Join-Path $failureTarget "data\models\voice-001\model.json") -Raw) -ne "metadata" -or
+            (Get-Content -LiteralPath (Join-Path $failureTarget "data\models\voice-001\weights.pth") -Raw) -ne "weights" -or
+            (Get-Content -LiteralPath (Join-Path $failureTarget "output\result.wav") -Raw) -ne "audio") {
             throw "故障点 $failurePoint 回滚后不是完整旧版本。"
         }
         $pendingTransactions = @(Get-ChildItem -LiteralPath (Join-Path $failureTarget ".cache\updates\transactions") -Directory -ErrorAction SilentlyContinue)
@@ -200,7 +217,7 @@ try {
         throw "中断事务自动恢复失败。"
     }
     Write-Host "更新保留测试通过：.venv、私有 Python、模型、训练记录、头像和本地配置均保留，程序文件已更新。" -ForegroundColor Green
-    Write-Host "更新失败回滚测试通过：损坏包在改动前被拒绝，5 个事务故障点均恢复为完整旧版本。" -ForegroundColor Green
+    Write-Host "更新失败回滚测试通过：损坏包在改动前被拒绝，6 个事务故障点均恢复为完整旧版本。" -ForegroundColor Green
     Write-Host "更新安全测试通过：并发锁、ZIP 路径穿越和中断 journal 恢复均符合预期。" -ForegroundColor Green
 } finally {
     Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue

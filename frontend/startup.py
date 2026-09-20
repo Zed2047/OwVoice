@@ -14,13 +14,15 @@ import uuid
 from pathlib import Path
 
 import requests
-from PySide6.QtCore import QObject, QThread, Signal, qInstallMessageHandler
+import psutil
+from PySide6.QtCore import QLockFile, QObject, QThread, Qt, Signal, Slot, qInstallMessageHandler
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QTextEdit,
@@ -29,6 +31,9 @@ from PySide6.QtWidgets import (
 )
 
 from frontend.app import ICON_PATH, OwVoiceApp, set_windows_app_identity
+from backend.process_lifecycle import get_process_supervisor
+from backend.logging_support import append_log, new_error_reference, rotate_log
+from backend.error_reporting import report_user_error
 from backend.text_encoding import read_text_tail
 
 
@@ -41,13 +46,13 @@ def install_frontend_exception_hook(project_dir: Path) -> None:
     log_path = project_dir / "logs" / "frontend.error.log"
 
     def handle(exc_type, exc_value, exc_traceback) -> None:
-        try:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            detail = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
-            with log_path.open("a", encoding="utf-8", errors="replace") as handle_file:
-                handle_file.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] 未处理的前端异常\n{detail}")
-        except OSError:
-            pass
+        detail = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+        append_log(
+            log_path,
+            "未处理的前端异常\n" + detail,
+            module="frontend",
+            error_reference=new_error_reference("STARTUP-500"),
+        )
 
     sys.excepthook = handle
 
@@ -57,12 +62,8 @@ def install_qt_message_handler(project_dir: Path) -> None:
     log_path = project_dir / "logs" / "frontend.qt.log"
 
     def handle(mode, _context, message) -> None:
-        try:
-            mode_name = getattr(mode, "name", str(mode))
-            with log_path.open("a", encoding="utf-8", errors="replace") as log_file:
-                log_file.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {mode_name}: {message}\n")
-        except OSError:
-            pass
+        mode_name = getattr(mode, "name", str(mode))
+        append_log(log_path, f"{mode_name}: {message}", module="frontend-qt", level="WARNING")
 
     qInstallMessageHandler(handle)
 
@@ -133,6 +134,90 @@ def tail_file(path: Path, limit: int = 1800) -> str:
     return read_text_tail(path, limit)
 
 
+class StartupRuntime:
+    """持有服务和日志资源；生命周期独立于会被 Qt 删除的启动 worker。"""
+
+    def __init__(self, project_dir: Path) -> None:
+        self.project_dir = project_dir.resolve()
+        self.process_supervisor = get_process_supervisor(self.project_dir)
+        self.processes: list[subprocess.Popen] = []
+        self.service_processes: dict[str, subprocess.Popen] = {}
+        self.log_files: list[object] = []
+        self._lock = threading.RLock()
+
+    def register(
+        self,
+        name: str,
+        process: subprocess.Popen,
+        log_handles: tuple[object, object],
+    ) -> None:
+        with self._lock:
+            self.processes.append(process)
+            self.service_processes[name] = process
+            self.log_files.extend(log_handles)
+        self.process_supervisor.register(process, name)
+
+    def stop_service(self, name: str) -> None:
+        with self._lock:
+            process = self.service_processes.pop(name, None)
+        if process is not None and process.poll() is None:
+            self.process_supervisor.stop_role(name)
+
+    def stop_all(self) -> None:
+        self.process_supervisor.stop_all()
+        with self._lock:
+            self.processes.clear()
+            self.service_processes.clear()
+            handles, self.log_files = self.log_files, []
+        for handle in handles:
+            try:
+                handle.close()
+            except OSError:
+                pass
+
+
+def warmup_gpt_sovits(project_dir: Path, voice: dict) -> None:
+    """在普通 Python 线程中预热，不持有或调用任何 QObject。"""
+
+    if os.environ.get("OWVOICE_WARMUP", "1").strip().lower() in {"0", "false", "off"}:
+        return
+    reference = resolve_project_path(project_dir, voice.get("reference_audio"))
+    if reference is None or not reference.is_file():
+        return
+    inference = voice.get("inference") or {}
+    params = {
+        "text": "你好。",
+        "text_language": str(voice.get("locale", "zh-CN")).split("-")[0],
+        "speed": 1.0,
+        "refer_wav_path": str(reference),
+        "prompt_text": str(voice.get("prompt_text", "")),
+        "prompt_language": voice.get("prompt_language", "zh"),
+        "top_k": int(inference.get("top_k", 15)),
+        "top_p": float(inference.get("top_p", 0.9)),
+        "temperature": float(inference.get("temperature", 0.8)),
+        "sample_steps": int(inference.get("sample_steps", 32)),
+        "cut_punc": str(inference.get("cut_punc", "，。？！；：,.?!…")),
+    }
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            response = requests.post("http://127.0.0.1:9880/", json=params, timeout=180)
+            if response.status_code != 200:
+                raise RuntimeError(f"HTTP {response.status_code}: {response.text[:300]}")
+            return
+        except Exception as exc:  # noqa: BLE001 - 预热失败不能影响主界面
+            last_error = exc
+            if attempt < 2:
+                time.sleep(4)
+    append_log(
+        project_dir / "logs" / "warmup.error.log",
+        f"后台预热失败：{last_error or '未知预热错误'}",
+        module="engine",
+        level="WARNING",
+        error_reference=new_error_reference("ENGINE-202"),
+    )
+
+
 class StartupWorker(QObject):
     status = Signal(str)
     progress = Signal(int)
@@ -140,12 +225,14 @@ class StartupWorker(QObject):
     failed = Signal(str)
     finished = Signal()
 
-    def __init__(self, project_dir: Path) -> None:
+    def __init__(self, project_dir: Path, runtime: StartupRuntime | None = None) -> None:
         super().__init__()
         self.project_dir = project_dir
-        self.processes: list[subprocess.Popen] = []
-        self.service_processes: dict[str, subprocess.Popen] = {}
-        self.log_files: list[object] = []
+        self.runtime = runtime or StartupRuntime(project_dir)
+        self.processes = self.runtime.processes
+        self.service_processes = self.runtime.service_processes
+        self.log_files = self.runtime.log_files
+        self.process_supervisor = self.runtime.process_supervisor
     def resolve_python_exe(self) -> Path:
         """OwVoice 使用项目目录下由用户安装的 Python 虚拟环境。"""
 
@@ -187,14 +274,27 @@ class StartupWorker(QObject):
     ) -> subprocess.Popen:
         logs_dir = self.project_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
-        stdout = (logs_dir / f"{name}.log").open("ab")
-        stderr = (logs_dir / f"{name}.error.log").open("ab")
-        self.log_files.extend((stdout, stderr))
+        stdout_path = logs_dir / f"{name}.log"
+        stderr_path = logs_dir / f"{name}.error.log"
+        rotate_log(stdout_path, max_bytes=10 * 1024 * 1024, backup_count=3)
+        rotate_log(stderr_path, max_bytes=10 * 1024 * 1024, backup_count=3)
+        append_log(stdout_path, "服务日志开始。", module=name, level="INFO")
+        append_log(stderr_path, "服务错误日志开始。", module=name, level="INFO")
+        stdout = stdout_path.open("ab")
+        stderr = stderr_path.open("ab")
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         if os.name == "nt":
             # EXE 使用无控制台模式时，子进程仍可能单独弹出控制台窗口。
             creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
         environment = dict(env or os.environ)
+        if name == "gpt_sovits":
+            # 模型加载会产生短时 CPU/磁盘突发。让引擎从创建第一刻起低于
+            # 前端优先级，避免 Windows 因 Qt 消息循环得不到调度而显示“未响应”。
+            creationflags |= getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+            environment["OMP_NUM_THREADS"] = "4"
+            environment["MKL_NUM_THREADS"] = "4"
+            environment["OPENBLAS_NUM_THREADS"] = "4"
+            environment["NUMEXPR_NUM_THREADS"] = "4"
         environment["PYTHONUTF8"] = "1"
         environment["PYTHONIOENCODING"] = "utf-8"
         nltk_data_dir = self.resolve_nltk_data_dir()
@@ -213,29 +313,20 @@ class StartupWorker(QObject):
             stdout.close()
             stderr.close()
             raise
-        self.processes.append(process)
-        self.service_processes[name] = process
+        try:
+            self.runtime.register(name, process, (stdout, stderr))
+        except Exception:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            raise
         return process
 
     def stop_service(self, name: str) -> None:
         """停止由本次启动流程创建的单个服务，不影响 OwVoice 后端。"""
 
-        process = self.service_processes.pop(name, None)
-        if process is None or process.poll() is not None:
-            return
-        try:
-            subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                check=False,
-            )
-        except OSError:
-            try:
-                process.kill()
-            except OSError:
-                pass
+        self.runtime.stop_service(name)
 
     def wait_for_port(
         self,
@@ -340,53 +431,9 @@ class StartupWorker(QObject):
 
     def warmup_gpt_sovits(self, voice: dict) -> None:
         """Warm up the active model in the background without delaying the main window."""
-        if os.environ.get("OWVOICE_WARMUP", "1").strip().lower() in {"0", "false", "off"}:
-            self.status.emit("已跳过语音引擎预热。")
-            return
+        warmup_gpt_sovits(self.project_dir, voice)
 
-        reference = resolve_project_path(self.project_dir, voice.get("reference_audio"))
-        if reference is None or not reference.is_file():
-            self.status.emit("预热跳过：参考音频不存在。")
-            return
-
-        inference = voice.get("inference") or {}
-        params = {
-            "text": "你好。",
-            "text_language": str(voice.get("locale", "zh-CN")).split("-")[0],
-            "speed": 1.0,
-            "refer_wav_path": str(reference),
-            "prompt_text": str(voice.get("prompt_text", "")),
-            "prompt_language": voice.get("prompt_language", "zh"),
-            "top_k": int(inference.get("top_k", 15)),
-            "top_p": float(inference.get("top_p", 0.9)),
-            "temperature": float(inference.get("temperature", 0.8)),
-            "sample_steps": int(inference.get("sample_steps", 32)),
-            "cut_punc": str(inference.get("cut_punc", "，。？！；：,.?!…")),
-        }
-        started = time.monotonic()
-        last_error: Exception | None = None
-        # GPT-SoVITS 端口打开后，默认 speaker 注册可能还差一个很短的时间。
-        # 预热失败不能影响主界面启动，有限重试可以避免把瞬时竞态记录成错误。
-        for attempt in range(3):
-            try:
-                response = requests.post("http://127.0.0.1:9880/", json=params, timeout=180)
-                if response.status_code != 200:
-                    raise RuntimeError(f"HTTP {response.status_code}: {response.text[:300]}")
-                self.status.emit(f"语音引擎预热完成（{time.monotonic() - started:.1f} 秒）。")
-                return
-            except Exception as exc:  # noqa: BLE001 - 预热失败不应阻塞主界面
-                last_error = exc
-                if attempt < 2:
-                    time.sleep(4)
-        exc = last_error or RuntimeError("未知预热错误")
-        try:
-            log_path = self.project_dir / "logs" / "warmup.error.log"
-            with log_path.open("a", encoding="utf-8") as log:
-                log.write(f"后台预热失败：{exc}\n")
-        except OSError:
-            pass
-        self.status.emit("语音引擎后台预热未完成，首次生成时会继续初始化。")
-
+    @Slot()
     def run(self) -> None:
         try:
             self.progress.emit(2)
@@ -399,8 +446,8 @@ class StartupWorker(QObject):
             self.progress.emit(98)
             self.status.emit("模型加载完成，正在后台预热并打开 OwVoice……")
             threading.Thread(
-                target=self.warmup_gpt_sovits,
-                args=(data["voice"],),
+                target=warmup_gpt_sovits,
+                args=(self.project_dir, data["voice"]),
                 name="owvoice-warmup",
                 daemon=True,
             ).start()
@@ -413,25 +460,7 @@ class StartupWorker(QObject):
             self.finished.emit()
 
     def stop_services(self) -> None:
-        for process in reversed(self.processes):
-            if process.poll() is None:
-                try:
-                    subprocess.run(
-                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                        check=False,
-                    )
-                except OSError:
-                    process.kill()
-        self.processes.clear()
-        for handle in self.log_files:
-            try:
-                handle.close()
-            except OSError:
-                pass
-        self.log_files.clear()
+        self.runtime.stop_all()
 
 
 class OwVoiceWindow(QMainWindow):
@@ -477,7 +506,21 @@ class OwVoiceWindow(QMainWindow):
         self.details.setReadOnly(True)
         self.details.setStyleSheet("background: #FAF9F5; border: 1px solid #E8E6DC; border-radius: 10px; padding: 8px; color: #5E5D59;")
         layout.addWidget(self.details, 1)
+        copy_row = QHBoxLayout()
+        copy_row.addStretch()
+        copy_selected = QPushButton("复制所选")
+        copy_selected.clicked.connect(self._copy_selected_details)
+        copy_all = QPushButton("复制全部")
+        copy_all.clicked.connect(lambda: QApplication.clipboard().setText(self.details.toPlainText()))
+        copy_row.addWidget(copy_selected)
+        copy_row.addWidget(copy_all)
+        layout.addLayout(copy_row)
         return page
+
+    def _copy_selected_details(self) -> None:
+        selected = self.details.textCursor().selectedText().replace("\u2029", "\n")
+        if selected:
+            QApplication.clipboard().setText(selected)
 
     def set_status(self, message: str) -> None:
         self.status_label.setText(message)
@@ -514,29 +557,62 @@ class StartupController(QObject):
         self.project_dir = project_dir
         self.startup_thread: QThread | None = None
         self.worker: StartupWorker | None = None
+        self.runtime = StartupRuntime(project_dir)
 
     def start(self) -> None:
         self.startup_thread = QThread()
-        self.worker = StartupWorker(self.project_dir)
+        self.worker = StartupWorker(self.project_dir, self.runtime)
         self.worker.moveToThread(self.startup_thread)
-        self.startup_thread.started.connect(self.worker.run)
+        # StartupWorker.run is replaced by the public-build compatibility layer
+        # after the QObject subclass has been created.  PySide therefore cannot
+        # rely on the class meta-object to queue that patched Python method to
+        # the worker thread.  Force a direct call from QThread.started's emitter
+        # thread; QThread emits started from the new worker thread, so all slow
+        # model/backend startup work stays off the GUI event loop.
+        self.startup_thread.started.connect(
+            self.worker.run,
+            Qt.ConnectionType.DirectConnection,
+        )
         self.worker.status.connect(self.status)
         self.worker.progress.connect(self.progress)
         self.worker.ready.connect(self.ready)
         self.worker.failed.connect(self.failed)
         self.worker.finished.connect(self.startup_thread.quit)
         self.worker.finished.connect(self.worker.deleteLater)
+        self.startup_thread.finished.connect(self._startup_finished)
         # StartupController 持有线程到应用退出，再由统一关闭流程回收，
         # 避免启动完成后仍有引用访问已删除的 QThread。
         self.startup_thread.start()
 
+    def _startup_finished(self) -> None:
+        thread = self.startup_thread
+        self.worker = None
+        self.startup_thread = None
+        if thread is not None:
+            thread.deleteLater()
+
+    def stop_service(self, name: str) -> None:
+        self.runtime.stop_service(name)
+
     def stop_services(self) -> None:
-        if self.worker is not None:
-            self.worker.stop_services()
+        self.runtime.stop_all()
+
+
+def prioritize_frontend_process() -> None:
+    """提高 GUI 调度优先级，抵抗模型启动阶段的资源突发。"""
+
+    if os.name != "nt":
+        return
+    try:
+        psutil.Process(os.getpid()).nice(psutil.ABOVE_NORMAL_PRIORITY_CLASS)
+    except (psutil.Error, OSError, ValueError):
+        # 优先级只是响应性保护，失败不能阻止程序启动。
+        return
 
 
 def main() -> int:
     set_windows_app_identity()
+    prioritize_frontend_process()
     project_dir = Path(
         os.environ.get("OWVOICE_PROJECT_DIR", Path(__file__).resolve().parents[1])
     )
@@ -545,6 +621,17 @@ def main() -> int:
     install_frontend_exception_hook(project_dir)
     app = QApplication(sys.argv)
     install_qt_message_handler(project_dir)
+    lock_path = project_dir / ".cache" / "runtime" / "OwVoice.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    instance_lock = QLockFile(str(lock_path))
+    instance_lock.setStaleLockTime(30_000)
+    if not instance_lock.tryLock(100):
+        QMessageBox.warning(
+            None,
+            "OwVoice 已在运行",
+            "检测到另一个 OwVoice 窗口正在运行。请先切换到已有窗口或关闭它后再试。",
+        )
+        return 1
     if ICON_PATH.is_file():
         app.setWindowIcon(QIcon(str(ICON_PATH)))
     window = OwVoiceApp(startup_mode=True)
@@ -556,6 +643,7 @@ def main() -> int:
     controller.ready.connect(window.finish_startup)
     app.aboutToQuit.connect(controller.stop_services)
     window.show()
+    window.start_startup_liveness_monitor()
     controller.start()
     return app.exec()
 
@@ -659,6 +747,7 @@ def _ow_load_config_safe(self) -> dict:
             return {"voice": voice}
     return {"voice": None}
 
+@Slot()
 def _ow_run_safe(self) -> None:
     try:
         self.progress.emit(2)
@@ -680,12 +769,22 @@ def _ow_run_safe(self) -> None:
         self.wait_model_catalog()
         self.progress.emit(98)
         self.status.emit("模型加载完成，正在后台预热并打开 OwVoice……")
-        threading.Thread(target=self.warmup_gpt_sovits, args=(voice,), name="owvoice-warmup", daemon=True).start()
+        threading.Thread(target=warmup_gpt_sovits, args=(self.project_dir, voice), name="owvoice-warmup", daemon=True).start()
         self.progress.emit(100)
         self.ready.emit()
     except Exception as exc:
         self.stop_services()
-        self.failed.emit(str(exc))
+        self.failed.emit(
+            report_user_error(
+                self.project_dir,
+                code="STARTUP-201",
+                module="frontend",
+                reason=str(exc),
+                impact="OwVoice 本次未进入工作台，已启动的本实例服务正在清理。",
+                advice="按提示关闭冲突程序或修复配置后重新启动。",
+                exception=exc,
+            )
+        )
     finally:
         self.finished.emit()
 

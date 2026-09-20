@@ -15,7 +15,7 @@ OwVoice 当前维护的主要修改文件包括：
 
 ## Python 依赖
 
-Python 依赖和 PyInstaller 运行库分别由 `requirements-*.txt` 与发布包中的 `_internal` 提供。PyTorch、PySide6、FastAPI、NumPy 等组件各自适用其上游许可证；重新分发和使用时应遵守对应项目的许可证及其附带声明。
+正式环境要求用户现有的 CPython 3.10.10 x64；程序只用它创建项目 `.venv`，不随包重新分发 Python。依赖声明与精确解析结果分别以 `pyproject.toml` 和 `uv.lock` 为准；`requirements-*.txt` 仅供人工查阅。PyInstaller 构建的桌面运行文件位于发布包 `_internal`。PyTorch、PySide6/Qt、FastAPI、NumPy 等组件各自适用其上游许可证；重新分发和使用时应遵守对应项目的许可证及其附带声明。
 
 ## uv
 

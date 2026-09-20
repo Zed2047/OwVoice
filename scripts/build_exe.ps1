@@ -54,6 +54,8 @@ $pyinstallerArgs = @(
     "--hidden-import", "backend.model_manager",
     "--hidden-import", "backend.training_errors",
     "--hidden-import", "backend.update_manager",
+    "--hidden-import", "backend.process_lifecycle",
+    "--hidden-import", "frontend.update_ui",
     # 训练依赖由用户点击本地训练后在项目 .venv 中按需加载，不能进入主 EXE。
     # 训练服务仍由项目 .venv 启动，故这些模块不能作为桌面端的打包依赖。
     "--exclude-module", "backend.training",

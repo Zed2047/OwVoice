@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "packages": [
+    {"distribution": "jieba", "version": "0.42.1", "imports": ["jieba", "jieba.posseg"], "features": ["cpu", "gpu", "training"], "smoke": "jieba"},
+    {"distribution": "pyside6", "version": "6.9.2", "imports": ["PySide6"], "features": ["cpu", "gpu", "training"]},
+    {"distribution": "transformers", "version": "4.50.0", "imports": ["transformers"], "features": ["cpu", "gpu", "training"]},
+    {"distribution": "nltk", "version": "3.10.3", "imports": ["nltk"], "features": ["cpu", "gpu", "training"]},
+    {"distribution": "torch", "version": "2.7.0", "imports": ["torch"], "features": ["cpu", "gpu"]},
+    {"distribution": "torchaudio", "version": "2.7.0", "imports": ["torchaudio"], "features": ["cpu", "gpu"]},
+    {"distribution": "onnxruntime", "version": "1.23.2", "imports": ["onnxruntime"], "features": ["cpu", "gpu"]},
+    {"distribution": "tensorboard", "version": "2.21.0", "imports": ["tensorboard"], "features": ["training"]},
+    {"distribution": "gradio", "version": "4.44.1", "imports": ["gradio"], "features": ["training"]},
+    {"distribution": "funasr", "version": "1.0.27", "imports": ["funasr"], "features": ["training"]},
+    {"distribution": "modelscope", "version": "1.39.1", "imports": ["modelscope"], "features": ["training"]},
+    {"distribution": "av", "version": "17.1.0", "imports": ["av"], "features": ["training"]}
+  ]
+}

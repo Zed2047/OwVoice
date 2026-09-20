@@ -9,8 +9,13 @@ $utf8 = New-Object System.Text.UTF8Encoding($false)
 $OutputEncoding = $utf8
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
+$env:HF_HUB_DISABLE_PROGRESS_BARS = "1"
+$env:HF_HUB_DISABLE_SYMLINKS_WARNING = "1"
 $projectDir = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "release_common.ps1")
+$environmentModulePath = Join-Path $PSScriptRoot "environment\OwVoice.Environment.psm1"
+if (-not (Test-Path -LiteralPath $environmentModulePath -PathType Leaf)) { throw "缺少公共环境核心：$environmentModulePath" }
+Import-Module -Name $environmentModulePath -Force
 $releaseIdentity = Get-OwVoiceReleaseIdentity -ProjectRoot $projectDir
 $appVersion = $releaseIdentity.tag
 Set-Location $projectDir
@@ -18,7 +23,7 @@ $venvDir = Join-Path $projectDir ".venv"
 $pythonExe = Join-Path $venvDir "Scripts\python.exe"
 $uvExe = Join-Path $projectDir "tools\uv\uv.exe"
 $uvSha256 = "efb9599543b26b3ea5adc1649bef69788633d9cc25c6cfd97b799e4dfa0c2cfb"
-$managedPythonVersion = "3.10.21"
+$recommendedPythonVersion = "3.10.10"
 $cacheDir = Join-Path $projectDir ".cache"
 $uvCacheDir = Join-Path $cacheDir "uv"
 $managedPythonDir = Join-Path $projectDir ".runtime\python"
@@ -27,6 +32,9 @@ $logDir = Join-Path $projectDir "logs"
 $logPath = Join-Path $logDir ("setup-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
 $configPath = Join-Path $projectDir "config\voices.local.json"
 $examplePath = Join-Path $projectDir "config\voices.example.json"
+$script:EnvironmentTransactionId = ""
+$script:EnvironmentSwitched = $false
+$script:EnvironmentCandidateCreated = $false
 
 function Write-Step([string]$message) { Write-Host ("`n[" + $message + "]") -ForegroundColor Cyan }
 
@@ -120,7 +128,7 @@ function Assert-Uv {
 }
 
 function Ensure-PythonEnvironment {
-    Write-Step "准备项目私有 Python $managedPythonVersion"
+    Write-Step "检查现有 CPython 3.10.x x64（推荐 $recommendedPythonVersion）"
     if (Test-Path -LiteralPath $pythonExe -PathType Leaf) {
         $info = Get-PythonInfo $pythonExe
         if ($info -notlike "3.10|64|CPython") { throw ".venv 中的 Python 不是 64 位 CPython 3.10。请手动重命名 .venv 后重试。" }
@@ -128,10 +136,12 @@ function Ensure-PythonEnvironment {
         return
     }
     if (Test-Path -LiteralPath $venvDir) { throw ".venv 已存在但不完整。请将其重命名为 .venv-broken 后重试。" }
-    New-Item -ItemType Directory -Force -Path $managedPythonDir, $uvCacheDir | Out-Null
-    & $uvExe python install $managedPythonVersion --install-dir $managedPythonDir --no-registry --no-bin
-    if ($LASTEXITCODE -ne 0) { throw "项目私有 Python 下载或安装失败。检查网络后可直接重试。" }
-    & $uvExe venv $venvDir --python $managedPythonVersion --managed-python
+    $existingPython = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($null -eq $existingPython -or -not (Test-Path -LiteralPath $existingPython.Source -PathType Leaf)) { throw "未找到现有 CPython 3.10.x x64。新安装推荐 $recommendedPythonVersion；请先安装并配置 python.exe 后重试。" }
+    $info = Get-PythonInfo $existingPython.Source
+    if ($info -notlike "3.10|64|CPython") { throw "当前 python.exe 不是兼容的 CPython 3.10.x x64。新安装推荐 $recommendedPythonVersion；请先修复 PATH 后重试。" }
+    New-Item -ItemType Directory -Force -Path $uvCacheDir | Out-Null
+    & $uvExe venv $venvDir --python $existingPython.Source
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $pythonExe -PathType Leaf)) { throw "无法创建项目私有 Python 环境。" }
 }
 
@@ -164,22 +174,41 @@ function Invoke-Setup {
     Write-Host "OwVoice $appVersion 首次配置/环境修复" -ForegroundColor Green
     Write-Host "项目目录：$projectDir"
     Write-Host "安装模式：$installMode"
-    Assert-Preflight $installMode
-    Assert-Uv
-    $env:UV_CACHE_DIR = $uvCacheDir
-    $env:UV_PYTHON_INSTALL_DIR = $managedPythonDir
-    $env:UV_PYTHON_INSTALL_REGISTRY = "0"
-    $env:UV_PYTHON_INSTALL_BIN = "0"
-    $env:UV_PROJECT_ENVIRONMENT = $venvDir
-    Ensure-PythonEnvironment
-    Sync-Dependencies $installMode
+    $withTraining = Test-TrainingInstalled
+    $script:EnvironmentWithTraining = $withTraining
+    $plan = Get-OwVoiceEnvironmentPlan -ProjectRoot $projectDir -Mode $installMode -WithTraining:$withTraining
+    if ((Test-Path -LiteralPath $venvDir -PathType Container) -and $plan.action -ne "reuse") {
+        $answer = (Read-Host "当前环境需要安全同步（$($plan.reason)）。程序会优先复制并复用兼容环境，只安装发生变化的依赖。是否继续？请输入 Y/N").Trim().ToUpperInvariant()
+        if ($answer -ne "Y") { throw "用户取消环境同步，未修改现有环境。" }
+        $plan = Get-OwVoiceEnvironmentPlan -ProjectRoot $projectDir -Mode $installMode -WithTraining:$withTraining -MigrateLegacy
+    }
+    $requiredBytes = if ($installMode -eq "GPU") { 24GB } else { 15GB }
+    $preflight = Test-OwVoiceEnvironmentPreflight -ProjectRoot $projectDir -Mode $installMode -WithTraining:$withTraining -RequiredFreeBytes $requiredBytes -UvPath $uvExe
+    if ($preflight.ok -ne $true) { throw [string]$preflight.message }
+    if ($plan.action -eq "reuse") {
+        Write-Host "现有项目环境与目标规范一致，跳过环境同步。" -ForegroundColor Green
+    } else {
+        $script:EnvironmentTransactionId = [Guid]::NewGuid().ToString()
+        $candidateResult = New-OwVoiceCandidateEnvironment -ProjectRoot $projectDir -TransactionId $script:EnvironmentTransactionId -CandidatePath (Join-Path $projectDir ".venv.next") -Mode $installMode -WithTraining:$withTraining -UvPath $uvExe
+        if ($candidateResult.ok -ne $true) { throw [string]$candidateResult.message }
+        $script:EnvironmentCandidateCreated = $true
+        $candidateCheck = Test-OwVoiceCandidateEnvironment -ProjectRoot $projectDir -TransactionId $script:EnvironmentTransactionId -CandidatePath (Join-Path $projectDir ".venv.next") -Mode $installMode -WithTraining:$withTraining
+        if ($candidateCheck.ok -ne $true) { throw ([string]$candidateCheck.message) }
+        $spec = Read-OwVoiceEnvironmentSpec -ProjectRoot $projectDir
+        $candidateState = New-OwVoiceEnvironmentState -Spec $spec -ProjectRoot $projectDir -Mode $installMode -WithTraining:$withTraining -EnvironmentFingerprint ([string]$plan.environment_fingerprint) -Python $candidateCheck.state.python -Verified:$true -TransactionId $script:EnvironmentTransactionId
+        $switchResult = Switch-OwVoiceEnvironment -ProjectRoot $projectDir -TransactionId $script:EnvironmentTransactionId -CandidatePath (Join-Path $projectDir ".venv.next") -State ([PSCustomObject]$candidateState)
+        if ($switchResult.ok -ne $true) { throw [string]$switchResult.message }
+        $script:EnvironmentSwitched = $true
+        Write-Host "候选环境已验证并切换为正式环境。" -ForegroundColor Green
+    }
 
     Write-Step "安装 NLTK 数据"
-    & $pythonExe (Join-Path $projectDir "scripts\download_nltk_data.py")
-    if ($LASTEXITCODE -ne 0) { throw "NLTK 数据安装失败。" }
+    $resourceProcessLogs = Join-Path $logDir "resource-processes"
+    $nltkExitCode = Invoke-OwVoiceTrackedProcess -FilePath $pythonExe -Arguments @((Join-Path $projectDir "scripts\download_nltk_data.py")) -Activity "正在准备 NLTK 文本资源" -LogRoot $resourceProcessLogs -WorkingDirectory $projectDir
+    if ($nltkExitCode -ne 0) { throw "NLTK 数据安装失败：$(Get-OwVoiceLastProcessFailureMessage)" }
     Write-Step "下载并校验 GPT-SoVITS 必需资源"
-    & $pythonExe (Join-Path $projectDir "scripts\download_pretrained.py")
-    if ($LASTEXITCODE -ne 0) { throw "GPT-SoVITS 预训练资源下载失败。" }
+    $pretrainedExitCode = Invoke-OwVoiceTrackedProcess -FilePath $pythonExe -Arguments @((Join-Path $projectDir "scripts\download_pretrained.py")) -Activity "正在准备 GPT-SoVITS 运行资源" -LogRoot $resourceProcessLogs -WorkingDirectory $projectDir
+    if ($pretrainedExitCode -ne 0) { throw "GPT-SoVITS 预训练资源下载失败：$(Get-OwVoiceLastProcessFailureMessage)" }
 
     Write-Step "检查语音配置"
     foreach ($directory in @("output", ".cache\synthesis", "logs")) { New-Item -ItemType Directory -Force -Path (Join-Path $projectDir $directory) | Out-Null }
@@ -189,15 +218,23 @@ function Invoke-Setup {
     if ($voices.Count -lt 1) { Write-Host "尚未导入角色模型；环境安装会正常完成，之后可在 OwVoice 中导入。" -ForegroundColor Yellow }
 
     Write-Step "最终运行检查"
-    & $pythonExe (Join-Path $projectDir "scripts\verify_runtime.py")
-    if ($LASTEXITCODE -ne 0) { throw "运行环境验证未通过。" }
+    $verifyExitCode = Invoke-OwVoiceTrackedProcess -FilePath $pythonExe -Arguments @((Join-Path $projectDir "scripts\verify_runtime.py")) -Activity "正在验证 OwVoice 运行环境" -LogRoot $resourceProcessLogs -WorkingDirectory $projectDir
+    if ($verifyExitCode -ne 0) { throw "运行环境验证未通过：$(Get-OwVoiceLastProcessFailureMessage)" }
     $torchCheck = "import torch; print('PyTorch', torch.__version__, 'CUDA', torch.version.cuda, '可用', torch.cuda.is_available()); raise SystemExit(0 if '$installMode' != 'GPU' or torch.cuda.is_available() else 2)"
-    & $pythonExe -c $torchCheck
-    if ($LASTEXITCODE -ne 0) { throw "GPU 模式下 PyTorch 未检测到可用 CUDA。请更新 NVIDIA 驱动或选择 CPU。" }
+    $torchExitCode = Invoke-OwVoiceTrackedProcess -FilePath $pythonExe -Arguments @("-c", $torchCheck) -Activity "正在检查 PyTorch 和 CUDA" -LogRoot $resourceProcessLogs -WorkingDirectory $projectDir
+    if ($torchExitCode -ne 0) { throw "GPU 模式下 PyTorch 未检测到可用 CUDA。请更新 NVIDIA 驱动或选择 CPU。详情：$(Get-OwVoiceLastProcessFailureMessage)" }
+    $spec = Read-OwVoiceEnvironmentSpec -ProjectRoot $projectDir
+    $finalState = New-OwVoiceEnvironmentState -Spec $spec -ProjectRoot $projectDir -Mode $installMode -WithTraining:$withTraining -EnvironmentFingerprint ([string]$plan.environment_fingerprint) -Python (Get-OwVoicePythonInfo $pythonExe) -Verified:$true -TransactionId $script:EnvironmentTransactionId
+    $complete = Complete-OwVoiceEnvironmentTransaction -ProjectRoot $projectDir -TransactionId $(if ($script:EnvironmentSwitched) { $script:EnvironmentTransactionId } else { [Guid]::NewGuid().ToString() }) -State ([PSCustomObject]$finalState)
+    if ($complete.ok -ne $true) { throw [string]$complete.message }
+    $script:EnvironmentSwitched = $false
     Write-Host "`n配置完成。普通用户请双击 OwVoice.exe 启动。" -ForegroundColor Green
 }
 
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+foreach ($oldLog in @(Get-ChildItem -LiteralPath $logDir -Filter "setup-*.log" -File | Sort-Object LastWriteTime -Descending | Select-Object -Skip 9)) {
+    Remove-Item -LiteralPath $oldLog.FullName -Force -ErrorAction SilentlyContinue
+}
 $transcriptStarted = $false
 $exitCode = 0
 try {
@@ -206,7 +243,17 @@ try {
     Invoke-Setup
 } catch {
     $exitCode = 1
+    $errorReference = "SETUP-500 · " + [Guid]::NewGuid().ToString("N").Substring(0, 8)
+    if ($script:EnvironmentSwitched -and -not [string]::IsNullOrWhiteSpace($script:EnvironmentTransactionId)) {
+        $restore = Restore-OwVoiceEnvironment -ProjectRoot $projectDir -TransactionId $script:EnvironmentTransactionId
+        if ($restore.ok -eq $true) { Write-Host "环境验证失败，旧环境已恢复。" -ForegroundColor Yellow } else { Write-Host "环境验证失败，自动恢复也失败：$($restore.message)" -ForegroundColor Red }
+    }
+    if ($script:EnvironmentCandidateCreated -and (Test-Path -LiteralPath (Join-Path $projectDir ".venv.next"))) {
+        Remove-Item -LiteralPath (Join-Path $projectDir ".venv.next") -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $script:EnvironmentCandidateCreated = $false
     Write-Host "`n安装未完成：$($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "错误编号：$errorReference" -ForegroundColor Red
     Write-Host "可以直接重新运行 setup.bat；下载缓存和已完成步骤会自动复用。" -ForegroundColor Yellow
     Write-Host "排错日志：$logPath" -ForegroundColor Yellow
 } finally {

@@ -10,6 +10,7 @@ import json
 import math
 import time
 import subprocess
+import threading
 import traceback
 import uuid
 from pathlib import Path
@@ -53,7 +54,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from backend.app_version import get_app_version
+from backend.process_lifecycle import get_process_supervisor
 from backend.text_encoding import read_text_tail
+from frontend.update_ui import UpdateCheckWorker, UpdateDialog, UpdateInfo, UpdatePreferences
 
 
 API_URL = os.environ.get("OWVOICE_API", "http://127.0.0.1:8765").rstrip("/")
@@ -423,10 +426,36 @@ class ModelEngineUnloadWorker(QObject):
             self.finished.emit()
 
 
+class InferenceProcessStopBridge(QObject):
+    success = Signal()
+    failed = Signal(str)
+    finished = Signal()
+
+
+def _run_inference_process_stop(
+    handle: object,
+    bridge: InferenceProcessStopBridge,
+    controller: object | None,
+    dynamic_engine_pid: int,
+) -> None:
+    try:
+        if controller is not None and hasattr(controller, "stop_service"):
+            controller.stop_service("gpt_sovits")
+        if dynamic_engine_pid:
+            get_process_supervisor(PROJECT_DIR).stop_pid(dynamic_engine_pid)
+        bridge.success.emit()
+    except Exception as exc:  # noqa: BLE001 - 交给 GUI 显示可读错误
+        bridge.failed.emit(str(exc))
+    finally:
+        handle.done.set()
+        bridge.finished.emit()
+
+
 class ModelCatalogWorker(QObject):
     """后台读取本地模型清单，避免权重目录扫描阻塞 Qt 主线程。"""
 
     loaded = Signal(object)
+    recovery_available = Signal(object)
     failed = Signal(str)
     finished = Signal()
 
@@ -446,6 +475,11 @@ class ModelCatalogWorker(QObject):
             if not isinstance(payload, list):
                 raise RuntimeError("模型清单格式无效")
             self.loaded.emit(payload)
+            recovery = requests.get(f"{self.api_url}/api/models/recovery", timeout=10)
+            recovery.raise_for_status()
+            recovery_payload = recovery.json()
+            if isinstance(recovery_payload, dict) and recovery_payload.get("needs_recovery"):
+                self.recovery_available.emit(recovery_payload)
         except Exception as exc:  # noqa: BLE001 - 交给界面显示
             self.failed.emit(str(exc))
         finally:
@@ -464,6 +498,7 @@ class EngineStartWorker(QObject):
         self.project_dir = project_dir
         self.voice = voice
         self.process: subprocess.Popen | None = None
+        self.process_supervisor = get_process_supervisor(project_dir)
 
     def _resolve_path(self, value: object) -> Path | None:
         raw = str(value or "").strip()
@@ -483,16 +518,7 @@ class EngineStartWorker(QObject):
     def _stop_process(self) -> None:
         if self.process is None or self.process.poll() is not None:
             return
-        try:
-            subprocess.run(
-                ["taskkill", "/PID", str(self.process.pid), "/T", "/F"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                check=False,
-            )
-        except OSError:
-            self.process.kill()
+        self.process_supervisor.stop_pid(self.process.pid)
 
     @staticmethod
     def _cancelled() -> bool:
@@ -536,6 +562,11 @@ class EngineStartWorker(QObject):
             logs_dir.mkdir(parents=True, exist_ok=True)
             stdout_path = logs_dir / "gpt_sovits.log"
             stderr_path = logs_dir / "gpt_sovits.error.log"
+            from backend.logging_support import append_log, rotate_log
+
+            for log_path in (stdout_path, stderr_path):
+                rotate_log(log_path, max_bytes=10 * 1024 * 1024, backup_count=3)
+                append_log(log_path, "语音引擎日志开始。", module="engine", level="INFO")
             environment = os.environ.copy()
             environment["PYTHONUTF8"] = "1"
             environment["PYTHONIOENCODING"] = "utf-8"
@@ -566,6 +597,7 @@ class EngineStartWorker(QObject):
                     creationflags=creationflags,
                     env=environment,
                 )
+                self.process_supervisor.register(self.process, "gpt_sovits")
             finally:
                 stdout.close()
                 stderr.close()
@@ -591,7 +623,19 @@ class EngineStartWorker(QObject):
             raise RuntimeError("等待 GPT-SoVITS 启动超时，请检查 logs 目录。")
         except Exception as exc:  # noqa: BLE001 - 交给主界面显示
             self._stop_process()
-            self.failed.emit(str(exc))
+            from backend.error_reporting import report_user_error
+
+            self.failed.emit(
+                report_user_error(
+                    self.project_dir,
+                    code="ENGINE-301",
+                    module="engine",
+                    reason=str(exc).split("\n", 1)[0],
+                    impact="该角色语音引擎未启动，主界面和模型文件不受影响。",
+                    advice="检查模型文件和公共资源，或切换其他角色后重试。",
+                    exception=exc,
+                )
+            )
         finally:
             self.finished.emit()
 
@@ -603,13 +647,14 @@ class ModelActionWorker(QObject):
     failed = Signal(str)
     finished = Signal()
 
-    def __init__(self, api_url: str, model_id: str, action: str, source_dir: str | None = None, new_name: str | None = None):
+    def __init__(self, api_url: str, model_id: str, action: str, source_dir: str | None = None, new_name: str | None = None, selected_files: dict[str, str] | None = None):
         super().__init__()
         self.api_url = api_url
         self.model_id = model_id
         self.action = action
         self.source_dir = source_dir
         self.new_name = new_name
+        self.selected_files = selected_files
 
     def run(self) -> None:
         try:
@@ -620,7 +665,10 @@ class ModelActionWorker(QObject):
             elif self.action == "import":
                 response = requests.post(
                     f"{self.api_url}/api/models/import",
-                    json={"source_dir": self.source_dir or ""},
+                    json={
+                        "source_dir": self.source_dir or "",
+                        "selected_files": self.selected_files,
+                    },
                     timeout=3600,
                 )
             elif self.action == "rename":
@@ -935,7 +983,7 @@ class TrainingApiWorker(QObject):
                 self.url,
                 json=self.payload,
                 headers=self.headers,
-                timeout=900 if self.method == "POST" else 120,
+                timeout=(5, 120 if self.method == "POST" else 30),
             )
             try:
                 data = response.json()
@@ -949,6 +997,146 @@ class TrainingApiWorker(QObject):
             self.failed.emit(str(exc))
         finally:
             self.finished.emit()
+
+
+class TrainingRequestHandle:
+    """普通 Python 请求的生命周期标记，兼容页面现有 busy 判断。"""
+
+    def __init__(self, request_id: int) -> None:
+        self.request_id = request_id
+        self.done = threading.Event()
+
+    def isRunning(self) -> bool:  # noqa: N802 - 与 QThread 查询接口兼容
+        return not self.done.is_set()
+
+    def requestInterruption(self) -> None:  # noqa: N802 - 请求由 requests 超时收尾
+        return
+
+    def quit(self) -> None:
+        return
+
+    def deleteLater(self) -> None:  # noqa: N802 - 纯 Python 对象无需 Qt 删除
+        return
+
+
+class TrainingRequestBridge(QObject):
+    """长期存在于 GUI 线程；普通 Python 线程仅通过信号返回结果。"""
+
+    loaded = Signal(int, object)
+    failed = Signal(int, str)
+    finished = Signal(int)
+
+
+class VoiceCatalogBridge(QObject):
+    """常驻 GUI 线程的角色目录信号桥，避免启动阶段同步网络请求。"""
+
+    loaded = Signal(int, object, object)
+    failed = Signal(int, str)
+
+
+def _fetch_voice_catalog(request_id: int, bridge: VoiceCatalogBridge, api_url: str) -> None:
+    """在普通后台线程读取健康状态和角色目录。"""
+
+    try:
+        health_response = requests.get(f"{api_url}/api/health", timeout=3)
+        health_response.raise_for_status()
+        health = health_response.json()
+        if not isinstance(health, dict):
+            raise RuntimeError("后端健康状态格式无效")
+        voices_response = requests.get(f"{api_url}/api/voices", timeout=5)
+        voices_response.raise_for_status()
+        voices = voices_response.json()
+        if not isinstance(voices, list):
+            raise RuntimeError("角色目录格式无效")
+        bridge.loaded.emit(request_id, health, voices)
+    except Exception as exc:  # noqa: BLE001 - 转成 GUI 可读错误
+        bridge.failed.emit(request_id, str(exc))
+
+
+class TrainingHeartbeatState:
+    """不持有 QObject 的心跳状态，允许后台线程安全更新。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.in_flight = False
+        self.failures = 0
+        self.last_error = ""
+        self.reported = False
+
+    def try_start(self) -> bool:
+        with self._lock:
+            if self.in_flight:
+                return False
+            self.in_flight = True
+            return True
+
+    def complete(self, error: str = "") -> None:
+        with self._lock:
+            self.in_flight = False
+            if error:
+                self.failures += 1
+                self.last_error = error
+            else:
+                self.failures = 0
+                self.last_error = ""
+                self.reported = False
+
+    def take_report(self) -> str:
+        with self._lock:
+            if self.failures < 3 or self.reported:
+                return ""
+            self.reported = True
+            return self.last_error
+
+
+def _run_training_api_request(
+    handle: TrainingRequestHandle,
+    bridge: TrainingRequestBridge,
+    method: str,
+    url: str,
+    payload: dict | None,
+    headers: dict[str, str],
+) -> None:
+    try:
+        response = requests.request(
+            method,
+            url,
+            json=payload,
+            headers=headers,
+            timeout=(5, 120 if method == "POST" else 30),
+        )
+        try:
+            data = response.json()
+        except ValueError:
+            data = {"detail": response.text.strip()}
+        if response.status_code >= 400:
+            detail = data.get("detail", response.text) if isinstance(data, dict) else response.text
+            raise RuntimeError(str(detail))
+        bridge.loaded.emit(handle.request_id, data)
+    except Exception as exc:  # noqa: BLE001 - 交给 GUI 线程显示
+        bridge.failed.emit(handle.request_id, str(exc))
+    finally:
+        handle.done.set()
+        bridge.finished.emit(handle.request_id)
+
+
+def _post_training_heartbeat(
+    state: TrainingHeartbeatState,
+    url: str,
+    job_id: str,
+    session_id: str,
+) -> None:
+    try:
+        response = requests.post(
+            url,
+            json={"job_id": job_id},
+            headers={"X-OwVoice-Session": session_id},
+            timeout=(3, 5),
+        )
+        response.raise_for_status()
+        state.complete()
+    except requests.RequestException as exc:
+        state.complete(str(exc))
 
 
 class TrainingSetupWorker(QObject):
@@ -1012,11 +1200,15 @@ class TrainingPage(QWidget):
         self.session_id = os.environ.get("OWVOICE_SESSION_ID", "").strip() or uuid.uuid4().hex
         self.job_id: str | None = None
         self.source_paths: list[str] = []
-        self.request_thread: QThread | None = None
-        self.request_worker: TrainingApiWorker | None = None
+        self.request_thread: TrainingRequestHandle | None = None
+        self.request_worker = None
+        self._training_request_sequence = 0
         self.training_setup_thread: QThread | None = None
         self.training_setup_worker: TrainingSetupWorker | None = None
         self.training_environment_ready = False
+        self.heartbeat_thread = None
+        self.heartbeat_worker = None
+        self.heartbeat_state = TrainingHeartbeatState()
         self.poll_timer = QTimer(self)
         self.poll_timer.setInterval(2000)
         self.poll_timer.timeout.connect(self._poll_status)
@@ -1406,6 +1598,7 @@ class ModelPlazaPage(QWidget):
         self.catalog_worker: ModelCatalogWorker | None = None
         self.preview_thread: QThread | None = None
         self.preview_worker: ModelPreviewWorker | None = None
+        self._recovery_prompted_diagnostic = ""
         self.avatar_labels: dict[str, AvatarLabel] = {}
         self.setObjectName("ModelPlazaPage")
 
@@ -1522,12 +1715,54 @@ class ModelPlazaPage(QWidget):
         self.catalog_worker.moveToThread(self.catalog_thread)
         self.catalog_thread.started.connect(self.catalog_worker.run)
         self.catalog_worker.loaded.connect(self._render_catalog)
+        self.catalog_worker.recovery_available.connect(self._offer_catalog_recovery)
         self.catalog_worker.failed.connect(self._catalog_failed)
         self.catalog_worker.finished.connect(self.catalog_thread.quit)
         self.catalog_worker.finished.connect(self.catalog_worker.deleteLater)
         self.catalog_thread.finished.connect(self._catalog_finished)
         # catalog_thread 由页面生命周期统一回收，避免 finished 后留下失效引用。
         self.catalog_thread.start()
+
+    def _offer_catalog_recovery(self, recovery: object) -> None:
+        if not isinstance(recovery, dict):
+            return
+        diagnostic = str(recovery.get("diagnostic_path") or "")
+        if diagnostic and diagnostic == self._recovery_prompted_diagnostic:
+            return
+        self._recovery_prompted_diagnostic = diagnostic
+        candidates = [item for item in recovery.get("candidates", []) if isinstance(item, dict)]
+        rejected = [item for item in recovery.get("rejected", []) if isinstance(item, dict)]
+        message = (
+            "本地模型清单已损坏，原文件和诊断副本均已保留。\n\n"
+            f"找到 {len(candidates)} 个可恢复模型"
+        )
+        if rejected:
+            message += f"，另有 {len(rejected)} 个目录未通过校验"
+        message += "。是否根据这些模型目录重建清单？\n不会删除或修改模型文件。"
+        answer = QMessageBox.question(
+            self,
+            "恢复模型清单",
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self.status_label.setText("模型清单损坏，已保留原文件；尚未执行恢复。")
+            return
+        try:
+            response = requests.post(
+                f"{self.api_url}/api/models/recovery",
+                json={"confirmed": True},
+                timeout=30,
+            )
+            response.raise_for_status()
+            count = int(response.json().get("count", 0))
+            self.status_label.setText(f"模型清单已恢复，共登记 {count} 个模型。")
+            self.models_changed.emit()
+            QTimer.singleShot(100, self.refresh_catalog)
+        except Exception as exc:  # noqa: BLE001 - 显示后端返回的可操作错误。
+            self.status_label.setText(f"模型清单恢复失败：{exc}")
+            QMessageBox.warning(self, "恢复失败", str(exc))
 
     def _render_catalog(self, models: object) -> None:
         self.models = [item for item in models if isinstance(item, dict)]
@@ -1693,9 +1928,9 @@ class ModelPlazaPage(QWidget):
             return
         self._run_action(str(model.get("id")), "rename", new_name=new_name)
 
-    def _run_action(self, model_id: str, action: str, source_dir: str | None = None, new_name: str | None = None) -> None:
+    def _run_action(self, model_id: str, action: str, source_dir: str | None = None, new_name: str | None = None, selected_files: dict[str, str] | None = None) -> None:
         self.action_thread = QThread(self)
-        self.action_worker = ModelActionWorker(self.api_url, model_id, action, source_dir, new_name)
+        self.action_worker = ModelActionWorker(self.api_url, model_id, action, source_dir, new_name, selected_files)
         self.action_worker.moveToThread(self.action_thread)
         self.action_thread.started.connect(self.action_worker.run)
         self.action_worker.success.connect(self._action_success)
@@ -1730,6 +1965,9 @@ class ModelPlazaPage(QWidget):
         self._update_buttons()
 
 class OwVoiceApp(QMainWindow):
+    training_engine_stopped = Signal()
+    training_engine_stop_failed = Signal(str)
+
     def __init__(self, startup_mode: bool = False) -> None:
         super().__init__()
         self.startup_mode = startup_mode
@@ -1748,7 +1986,29 @@ class OwVoiceApp(QMainWindow):
         self.model_release_worker: ModelEngineUnloadWorker | None = None
         self.engine_start_thread: QThread | None = None
         self.engine_start_worker: EngineStartWorker | None = None
+        self.engine_stop_thread: TrainingRequestHandle | None = None
+        self.engine_stop_worker = None
+        self.engine_stop_bridge = InferenceProcessStopBridge(self)
+        self.engine_stop_bridge.success.connect(self._training_engine_stop_success)
+        self.engine_stop_bridge.failed.connect(self._training_engine_stop_failure)
+        self.engine_stop_bridge.finished.connect(self._training_engine_stop_finished)
+        self.voice_catalog_bridge = VoiceCatalogBridge(self)
+        self.voice_catalog_bridge.loaded.connect(self._voice_catalog_loaded)
+        self.voice_catalog_bridge.failed.connect(self._voice_catalog_failed)
+        self._voice_load_sequence = 0
+        self._voice_load_in_flight = False
+        self._voice_load_callbacks: list[object] = []
+        self.update_check_thread: QThread | None = None
+        self.update_check_worker: UpdateCheckWorker | None = None
+        self.update_check_silent = False
+        self.update_preferences = UpdatePreferences()
         self.dynamic_engine_pid = 0
+        self._close_pending = False
+        self._close_retry_scheduled = False
+        self._startup_liveness_last = time.monotonic()
+        self._startup_liveness_timer = QTimer(self)
+        self._startup_liveness_timer.setInterval(250)
+        self._startup_liveness_timer.timeout.connect(self._check_startup_ui_liveness)
         self._last_health: dict = {}
         self.output_dir = OUTPUT_DIR
         self.last_audio = self.output_dir / "last.wav"
@@ -2076,6 +2336,27 @@ class OwVoiceApp(QMainWindow):
         self.startup_status_label.setText(message)
         self.startup_details.append(message)
 
+    def start_startup_liveness_monitor(self) -> None:
+        if not self.startup_mode:
+            return
+        self._startup_liveness_last = time.monotonic()
+        self._startup_liveness_timer.start()
+
+    def _check_startup_ui_liveness(self) -> None:
+        now = time.monotonic()
+        gap = now - self._startup_liveness_last
+        self._startup_liveness_last = now
+        if gap < 1.5:
+            return
+        from backend.logging_support import append_log
+
+        append_log(
+            PROJECT_DIR / "logs" / "frontend.performance.log",
+            f"启动界面事件循环停顿 {gap:.2f} 秒；当前状态：{self.startup_status_label.text()}",
+            module="frontend-performance",
+            level="WARNING",
+        )
+
     def set_startup_progress(self, value: int) -> None:
         if not self.startup_mode:
             return
@@ -2099,10 +2380,14 @@ class OwVoiceApp(QMainWindow):
     def finish_startup(self) -> None:
         if not self.startup_mode:
             return
+        self.set_startup_status("服务已就绪，正在后台加载角色列表……")
+        self.load_voices(callback=self._finish_startup_after_voices)
+
+    def _finish_startup_after_voices(self) -> None:
+        self._startup_liveness_timer.stop()
         self.startup_wave.stop()
         self.setWindowTitle("OwVoice - 守望先锋角色语音工具")
         self.page_stack.setCurrentWidget(self.tool_page)
-        self.load_voices()
         # 后台检查，不阻塞首次启动；同一版本只提示一次。
         QTimer.singleShot(1800, self.check_updates_silently)
 
@@ -2262,73 +2547,104 @@ class OwVoiceApp(QMainWindow):
     def check_updates_silently(self) -> None:
         self.check_updates(silent=True)
 
-    def _update_state_path(self) -> Path:
-        return PROJECT_DIR / ".cache" / "update-check.json"
-
-    def _was_update_notified(self, version: str) -> bool:
-        try:
-            state = json.loads(self._update_state_path().read_text(encoding="utf-8"))
-            return str(state.get("notifiedVersion", "")) == version
-        except (OSError, json.JSONDecodeError):
-            return False
-
-    def _remember_update_notification(self, version: str) -> None:
-        path = self._update_state_path()
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({"notifiedVersion": version}, ensure_ascii=False), encoding="utf-8")
-        except OSError:
-            pass
-
     def check_updates(self, silent: bool = False) -> None:
-        self.about_button.setEnabled(False)
-        try:
-            response = requests.get(f"{self.api_url()}/api/updates", timeout=30)
-            response.raise_for_status()
-            update = response.json()
-            app_update = update.get("app") or {}
-            if not app_update.get("available"):
-                if not silent:
-                    QMessageBox.information(self, "检查更新", f"当前已是最新版本（{update.get('currentVersion', APP_VERSION)}）。")
-                return
-            latest_version = str(update.get("latestVersion", ""))
-            if silent and self._was_update_notified(latest_version):
-                return
-            download_url = str(app_update.get("downloadUrl") or "")
-            sha256 = str(app_update.get("sha256") or "")
-            expected_size = int(app_update.get("size") or 0)
-            script = PROJECT_DIR / "updater" / "update_release.ps1"
-            if not download_url or len(sha256) != 64 or expected_size < 1 or not script.is_file():
-                if not silent:
-                    QMessageBox.warning(self, "暂时无法更新", "发现新版本，但当前发布包缺少完整校验信息，请稍后再试。")
-                return
-            if silent:
-                self._remember_update_notification(latest_version)
-            answer = QMessageBox.question(
-                self,
-                "发现新版本",
-                f"发现 OwVoice {latest_version}，是否现在下载并更新？\n\n更新会保留你的配置、角色模型、输出和缓存。",
-            )
-            if answer != QMessageBox.Yes:
-                return
-            command = [
-                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                "-File", str(script),
-                "-DownloadUrl", download_url,
-                "-Sha256", sha256,
-                "-ExpectedSize", str(expected_size),
-                "-TargetDirectory", str(PROJECT_DIR),
-                "-WaitPid", str(os.getpid()),
-                "-RestartPath", str(PROJECT_DIR / "OwVoice.exe"),
-            ]
-            subprocess.Popen(command, cwd=str(PROJECT_DIR), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            self.set_status("更新程序已启动，正在退出并替换文件……", warning=True)
-            QTimer.singleShot(300, QApplication.quit)
-        except Exception as exc:  # noqa: BLE001 - 显示更新检查错误
+        if self.update_check_thread is not None:
             if not silent:
-                QMessageBox.warning(self, "检查更新失败", str(exc))
-        finally:
-            self.about_button.setEnabled(True)
+                self.update_check_silent = False
+                self.set_status("正在检查更新，请稍候……", warning=True)
+            return
+        self.update_check_silent = silent
+        self.about_button.setEnabled(False)
+        if not silent:
+            self.set_status("正在检查更新……", warning=True)
+        self.update_check_thread = QThread(self)
+        self.update_check_worker = UpdateCheckWorker(self.api_url())
+        self.update_check_worker.moveToThread(self.update_check_thread)
+        self.update_check_thread.started.connect(self.update_check_worker.run)
+        # 直接连接 QObject 槽，确保弹窗和控件更新回到 GUI 线程。
+        self.update_check_worker.loaded.connect(self._update_check_loaded)
+        self.update_check_worker.failed.connect(self._update_check_failed)
+        self.update_check_worker.finished.connect(self.update_check_thread.quit)
+        self.update_check_worker.finished.connect(self.update_check_worker.deleteLater)
+        self.update_check_thread.finished.connect(self._update_check_finished)
+        self.update_check_thread.start()
+
+    @Slot(dict)
+    def _update_check_loaded(self, payload: dict) -> None:
+        silent = self.update_check_silent
+        info = UpdateInfo.from_payload(payload)
+        if not info.is_available(payload):
+            if not silent:
+                QMessageBox.information(
+                    self,
+                    "检查更新",
+                    f"当前已是最新版本（{info.current_version or APP_VERSION}）。",
+                )
+                self.set_status("当前已是最新版本")
+            return
+        if silent and self.update_preferences.is_skipped(info.latest_version):
+            return
+        script = PROJECT_DIR / "updater" / "update_release.ps1"
+        if not info.is_installable() or not script.is_file():
+            if not silent:
+                QMessageBox.warning(
+                    self,
+                    "暂时无法更新",
+                    "发现新版本，但发布包缺少完整校验信息，请稍后再试。",
+                )
+            return
+        archive_path = PROJECT_DIR / ".cache" / "updates" / "downloads" / f"OwVoice-v{info.latest_version}.zip"
+        dialog = UpdateDialog(
+            info,
+            archive_path,
+            self,
+            skip_checked=self.update_preferences.is_skipped(info.latest_version),
+        )
+        dialog.exec()
+        if dialog.result_action != "install":
+            if dialog.skip_checkbox.isChecked():
+                self.update_preferences.skip(info.latest_version)
+            elif self.update_preferences.is_skipped(info.latest_version):
+                self.update_preferences.clear()
+            return
+        self.update_preferences.clear()
+        command = [
+            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", str(script),
+            "-LocalArchivePath", str(dialog.archive_path),
+            "-Sha256", info.sha256,
+            "-ExpectedSize", str(info.size),
+            "-TargetDirectory", str(PROJECT_DIR),
+            "-WaitPid", str(os.getpid()),
+            "-RestartPath", str(PROJECT_DIR / "OwVoice.exe"),
+        ]
+        if info.requires_environment_migration:
+            command.extend(["-ApproveEnvironmentMigration", "-EnvironmentMode", dialog.environment_mode()])
+            if dialog.environment_with_training():
+                command.append("-EnvironmentWithTraining")
+        subprocess.Popen(
+            command,
+            cwd=str(PROJECT_DIR),
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+        )
+        self.set_status("更新已校验；即将打开独立更新窗口并显示安装进度……", warning=True)
+        QTimer.singleShot(300, QApplication.quit)
+
+    @Slot(str)
+    def _update_check_failed(self, message: str) -> None:
+        silent = self.update_check_silent
+        if not silent:
+            QMessageBox.warning(self, "检查更新失败", message)
+            self.set_status("检查更新失败", error=True)
+
+    @Slot()
+    def _update_check_finished(self) -> None:
+        thread = self.update_check_thread
+        self.update_check_thread = None
+        self.update_check_worker = None
+        self.update_check_silent = False
+        _ow_delete_finished_thread(thread)
+        self.about_button.setEnabled(True)
     def show_workspace(self) -> None:
         self.workspace_stack.setCurrentWidget(self.workspace_page)
 
@@ -2336,25 +2652,42 @@ class OwVoiceApp(QMainWindow):
         self.workspace_stack.setCurrentWidget(self.model_plaza_page)
         self.model_plaza_page.refresh_catalog()
 
-    def load_voices(self) -> None:
-        try:
-            api_url = self.api_url()
-            health_response = requests.get(f"{api_url}/api/health", timeout=3)
-            health_response.raise_for_status()
-            health = health_response.json()
-            self._last_health = health if isinstance(health, dict) else {}
-            if not health.get("gpt_sovits_online"):
-                self.set_status("GPT-SoVITS 未启动", warning=True)
-            else:
-                self.set_status("引擎在线")
-            voices_response = requests.get(f"{api_url}/api/voices", timeout=5)
-            voices_response.raise_for_status()
-            voices = voices_response.json()
-        except Exception as exc:  # noqa: BLE001
-            self.set_status("OwVoice 后端未启动", error=True)
-            self.generate_button.setEnabled(False)
-            QMessageBox.warning(self, "连接失败", f"无法连接 OwVoice 后端：\n{exc}")
+    def load_voices(self, callback=None) -> None:
+        """异步刷新角色列表，启动和模型切换期间不阻塞 GUI 事件循环。"""
+
+        if callback is not None:
+            self._voice_load_callbacks.append(callback)
+        if self._voice_load_in_flight:
             return
+        self._voice_load_in_flight = True
+        self._voice_load_sequence += 1
+        request_id = self._voice_load_sequence
+        self.generate_button.setEnabled(False)
+        threading.Thread(
+            target=_fetch_voice_catalog,
+            args=(request_id, self.voice_catalog_bridge, self.api_url()),
+            name=f"owvoice-voice-catalog-{request_id}",
+            daemon=True,
+        ).start()
+
+    @Slot(int, object, object)
+    def _voice_catalog_loaded(
+        self,
+        request_id: int,
+        health: object,
+        voices: object,
+    ) -> None:
+        if request_id != self._voice_load_sequence:
+            return
+        self._voice_load_in_flight = False
+        if not isinstance(health, dict) or not isinstance(voices, list):
+            self._voice_catalog_failed(request_id, "角色目录响应格式无效")
+            return
+        self._last_health = health
+        if not health.get("gpt_sovits_online"):
+            self.set_status("GPT-SoVITS 未启动", warning=True)
+        else:
+            self.set_status("引擎在线")
 
         changed_default_ids = _sync_voice_prompt_defaults(
             self._loaded_default_prompts,
@@ -2385,23 +2718,53 @@ class OwVoiceApp(QMainWindow):
         if not self.voices:
             self.clear_current_voice()
             self.set_status("没有可用角色", error=True)
-            return
-        self.generate_button.setEnabled(bool(health.get("gpt_sovits_online")))
-        selected_voice_id = health.get("selected_voice_id")
-        available_ids = {str(voice.get("id")) for voice in self.voices}
-        target_voice_id = selected_voice_id if selected_voice_id in available_ids else self.voices[0]["id"]
-        self.select_voice(target_voice_id)
-        if target_voice_id in changed_default_ids:
-            current_voice = next(
-                (voice for voice in self.voices if voice.get("id") == target_voice_id),
-                None,
+        else:
+            self.generate_button.setEnabled(bool(health.get("gpt_sovits_online")))
+            selected_voice_id = health.get("selected_voice_id")
+            available_ids = {str(voice.get("id")) for voice in self.voices}
+            target_voice_id = (
+                selected_voice_id
+                if selected_voice_id in available_ids
+                else self.voices[0]["id"]
             )
-            if current_voice is not None:
-                self.text_input.setPlainText(self.default_prompt(current_voice))
+            self.select_voice(
+                target_voice_id,
+                backend_already_selected=target_voice_id == selected_voice_id,
+            )
+            if target_voice_id in changed_default_ids:
+                current_voice = next(
+                    (voice for voice in self.voices if voice.get("id") == target_voice_id),
+                    None,
+                )
+                if current_voice is not None:
+                    self.text_input.setPlainText(self.default_prompt(current_voice))
+
+        callbacks, self._voice_load_callbacks = self._voice_load_callbacks, []
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception as exc:  # noqa: BLE001 - 防止刷新后的业务回调关闭窗口
+                _ow_write_frontend_error("角色列表刷新回调失败", exc)
+
+    @Slot(int, str)
+    def _voice_catalog_failed(self, request_id: int, message: str) -> None:
+        if request_id != self._voice_load_sequence:
+            return
+        self._voice_load_in_flight = False
+        self._voice_load_callbacks.clear()
+        self.set_status("OwVoice 后端未启动", error=True)
+        self.generate_button.setEnabled(False)
+        detail = f"无法连接 OwVoice 后端：\n{message}"
+        if self.startup_mode and self.page_stack.currentWidget() is self.loading_page:
+            self.show_startup_error(detail)
+        else:
+            QMessageBox.warning(self, "连接失败", detail)
 
     def _on_models_changed(self) -> None:
         """模型清单变化后刷新角色，并在空工作台中启动推理引擎。"""
-        self.load_voices()
+        self.load_voices(callback=self._start_engine_after_voice_refresh)
+
+    def _start_engine_after_voice_refresh(self) -> None:
         if not self.voices or self._last_health.get("gpt_sovits_online"):
             return
         selected_id = self._last_health.get("selected_voice_id")
@@ -2428,25 +2791,32 @@ class OwVoiceApp(QMainWindow):
     def stop_inference_service_for_training(self) -> None:
         """训练前释放推理引擎，避免与本地训练争抢显存。"""
 
-        # 启动阶段创建的 GPT-SoVITS 进程由 StartupWorker 持有；动态启动的
-        # 进程则由当前窗口记录。两种来源都要处理，避免训练时残留推理进程。
+        if self.engine_stop_thread is not None:
+            return
         controller = getattr(self, "startup_controller", None)
-        startup_worker = getattr(controller, "worker", None)
-        if startup_worker is not None and hasattr(startup_worker, "stop_service"):
-            startup_worker.stop_service("gpt_sovits")
-        if self.dynamic_engine_pid:
-            try:
-                subprocess.run(
-                    ["taskkill", "/PID", str(self.dynamic_engine_pid), "/T", "/F"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                    check=False,
-                )
-            except OSError:
-                pass
-            self.dynamic_engine_pid = 0
+        handle = TrainingRequestHandle(0)
+        self.engine_stop_thread = handle
+        threading.Thread(
+            target=_run_inference_process_stop,
+            args=(handle, self.engine_stop_bridge, controller, self.dynamic_engine_pid),
+            name="owvoice-stop-inference",
+            daemon=True,
+        ).start()
+
+    @Slot()
+    def _training_engine_stop_success(self) -> None:
+        self.dynamic_engine_pid = 0
         self._last_health["gpt_sovits_online"] = False
+        self.training_engine_stopped.emit()
+
+    @Slot(str)
+    def _training_engine_stop_failure(self, message: str) -> None:
+        self.training_engine_stop_failed.emit(message)
+
+    @Slot()
+    def _training_engine_stop_finished(self) -> None:
+        self.engine_stop_thread = None
+        self.engine_stop_worker = None
 
     @Slot(int)
     def _dynamic_engine_ready(self, process_id: int) -> None:
@@ -2501,12 +2871,12 @@ class OwVoiceApp(QMainWindow):
             self.generate_button.setEnabled(False)
             QMessageBox.warning(self, "连接失败", f"无法连接 OwVoice 后端：\n{exc}")
 
-    def select_voice(self, voice_id: str) -> None:
+    def select_voice(self, voice_id: str, backend_already_selected: bool = False) -> None:
         voice = next((item for item in self.voices if item.get("id") == voice_id), None)
         if not voice:
             return
         voice_changed = self.current_voice_id != voice_id
-        if voice_changed:
+        if voice_changed and not backend_already_selected:
             try:
                 response = requests.post(
                     f"{self.api_url()}/api/voices/{voice_id}/select",
@@ -2758,8 +3128,8 @@ class OwVoiceApp(QMainWindow):
         if preview_player is not None:
             preview_player.stop()
 
-        # Qt 不允许销毁仍在运行的 QThread。关闭时等待短时间让正常收尾完成；
-        # 网络请求或环境安装若仍未结束，则保留窗口，避免 native crash。
+        # Qt 不允许销毁仍在运行的 QThread。这里只发出停止请求并异步复查，
+        # 绝不在 GUI 线程 wait，否则 Windows 会把窗口判定为“未响应”。
         background_threads: list[QThread] = []
         for owner in (
             self,
@@ -2774,7 +3144,10 @@ class OwVoiceApp(QMainWindow):
                 "startup_thread",
                 "model_release_thread",
                 "engine_start_thread",
+                "engine_stop_thread",
+                "update_check_thread",
                 "request_thread",
+                "heartbeat_thread",
                 "training_setup_thread",
                 "avatar_preview_thread",
                 "catalog_thread",
@@ -2798,34 +3171,32 @@ class OwVoiceApp(QMainWindow):
             try:
                 thread.requestInterruption()
                 thread.quit()
-                finished = thread.wait(1500)
             except RuntimeError:
                 # 线程在收尾期间被 Qt 删除，视为已经结束。
                 continue
-            if not finished:
-                still_running.append(thread)
+            still_running.append(thread)
         if still_running:
-            QMessageBox.warning(
-                self,
-                "后台任务仍在运行",
-                "当前有后台操作尚未结束，程序暂不关闭。\n请稍后再点击关闭；本地训练后端会继续运行。",
-            )
+            self._close_pending = True
+            self.set_status("正在安全结束后台操作，请稍候……", warning=True)
+            self._schedule_close_retry()
             event.ignore()
             return
 
         if self.dynamic_engine_pid:
-            try:
-                subprocess.run(
-                    ["taskkill", "/PID", str(self.dynamic_engine_pid), "/T", "/F"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                    check=False,
-                )
-            except OSError:
-                pass
+            get_process_supervisor(PROJECT_DIR).stop_pid(self.dynamic_engine_pid)
             self.dynamic_engine_pid = 0
         super().closeEvent(event)
+
+    def _schedule_close_retry(self) -> None:
+        if self._close_retry_scheduled:
+            return
+        self._close_retry_scheduled = True
+        QTimer.singleShot(100, self._retry_close_after_threads)
+
+    def _retry_close_after_threads(self) -> None:
+        self._close_retry_scheduled = False
+        if self._close_pending:
+            self.close()
 
     def normalized_filename(self) -> str:
         raw_name = self.filename_input.text().strip()
@@ -2893,7 +3264,38 @@ def _ow_import_local_model(self) -> None:
     source_dir = QFileDialog.getExistingDirectory(self, "选择单个模型包或模型集合文件夹", str(default_dir))
     if not source_dir:
         return
-    self._run_action("", "import", source_dir=source_dir)
+    source = Path(source_dir).resolve()
+    selected_files: dict[str, str] = {}
+    if not (source / "model.json").is_file():
+        candidate_groups = (
+            ("gpt", "GPT 权重", "*.ckpt", "GPT 权重 (*.ckpt)"),
+            ("sovits", "SoVITS 权重", "*.pth", "SoVITS 权重 (*.pth)"),
+            ("reference", "参考音频", "*.wav", "WAV 音频 (*.wav)"),
+        )
+        for key, label, pattern, file_filter in candidate_groups:
+            candidates = sorted(path.resolve() for path in source.rglob(pattern) if path.is_file())
+            if len(candidates) <= 1:
+                continue
+            selected, _filter = QFileDialog.getOpenFileName(
+                self,
+                f"请选择 {label}",
+                str(source),
+                file_filter,
+            )
+            if not selected:
+                self.status_label.setText("已取消导入，模型清单和文件均未改变。")
+                return
+            selected_path = Path(selected).resolve()
+            if selected_path not in candidates:
+                QMessageBox.warning(self, "选择无效", f"请选择当前训练目录中的 {label}。")
+                return
+            selected_files[key] = str(selected_path)
+    self._run_action(
+        "",
+        "import",
+        source_dir=source_dir,
+        selected_files=selected_files or None,
+    )
 
 def _ow_update_local_model_buttons(self, *_args) -> None:
     model = self._selected_model()
@@ -2933,13 +3335,15 @@ ModelPlazaPage.__init__ = _ow_model_page_init
 def _ow_write_frontend_error(context: str, exc: BaseException) -> Path:
     """没有控制台时，把 Qt 主线程异常写入项目日志。"""
     log_path = PROJECT_DIR / "logs" / "frontend.error.log"
-    try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-        with log_path.open("a", encoding="utf-8", errors="replace") as handle:
-            handle.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {context}\n{detail}")
-    except OSError:
-        pass
+    from backend.logging_support import append_log, new_error_reference
+
+    detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    append_log(
+        log_path,
+        f"{context}\n{detail}",
+        module="frontend",
+        error_reference=new_error_reference("STARTUP-500"),
+    )
     return log_path
 
 
@@ -3062,6 +3466,13 @@ def _ow_training_build_ui(self) -> None:
     self.training_log_text_edit = None
     self._training_log_cache = ""
     self._pending_training_navigation: str | None = None
+    self.heartbeat_thread = None
+    self.heartbeat_worker = None
+    self.heartbeat_state = TrainingHeartbeatState()
+    self.request_bridge = TrainingRequestBridge(self)
+    self.request_bridge.loaded.connect(self._ow_training_bridge_loaded)
+    self.request_bridge.failed.connect(self._ow_training_bridge_failed)
+    self.request_bridge.finished.connect(self._ow_training_bridge_finished)
     self.training_heartbeat_timer = QTimer(self)
     self.training_heartbeat_timer.setInterval(5000)
     self.training_heartbeat_timer.timeout.connect(self._ow_training_send_heartbeat)
@@ -3274,6 +3685,9 @@ def _ow_training_build_ui(self) -> None:
     self.status_label = _ow_training_label("请选择训练素材开始。", "TrainingStatusLabel")
     self.status_label.setWordWrap(True)
     action_layout.addWidget(self.status_label)
+    self.overall_progress_label = _ow_training_hint("总体进度：0%")
+    self.overall_progress_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    action_layout.addWidget(self.overall_progress_label)
     self.progress = QProgressBar()
     self.progress.setObjectName("TrainingProgress")
     self.progress.setRange(0, 100)
@@ -3287,7 +3701,7 @@ def _ow_training_build_ui(self) -> None:
     self.cancel_button.setObjectName("TrainingSecondaryButton")
     self.cancel_button.setEnabled(False)
     self.cancel_button.clicked.connect(self._cancel)
-    self.train_button = QPushButton("开始/继续训练")
+    self.train_button = QPushButton("开始训练")
     self.train_button.setObjectName("TrainingPrimaryButton")
     self.train_button.setEnabled(False)
     self.train_button.clicked.connect(self._start_training)
@@ -3370,10 +3784,26 @@ def _ow_training_show_log(self) -> None:
     copy_status = _ow_training_hint("")
     footer.addWidget(copy_status)
     footer.addStretch()
-    copy_button = QPushButton("一键复制")
-    copy_button.setObjectName("TrainingSecondaryButton")
-    copy_button.clicked.connect(lambda: (QApplication.clipboard().setText(text_edit.toPlainText()), copy_status.setText("已复制")))
-    footer.addWidget(copy_button)
+    def copy_selected() -> None:
+        selected = text_edit.textCursor().selectedText().replace("\u2029", "\n")
+        if not selected:
+            copy_status.setText("请先选择内容")
+            return
+        QApplication.clipboard().setText(selected)
+        copy_status.setText("已复制所选内容")
+
+    def copy_all() -> None:
+        QApplication.clipboard().setText(text_edit.toPlainText())
+        copy_status.setText("已复制全部")
+
+    copy_selected_button = QPushButton("复制所选")
+    copy_selected_button.setObjectName("TrainingSecondaryButton")
+    copy_selected_button.clicked.connect(copy_selected)
+    footer.addWidget(copy_selected_button)
+    copy_all_button = QPushButton("复制全部")
+    copy_all_button.setObjectName("TrainingSecondaryButton")
+    copy_all_button.clicked.connect(copy_all)
+    footer.addWidget(copy_all_button)
     close_button = QPushButton("关闭")
     close_button.setObjectName("TrainingPrimaryButton")
     close_button.clicked.connect(dialog.close)
@@ -3713,8 +4143,55 @@ def _ow_training_create_job(self) -> None:
     self._request("POST", "/api/training/jobs", payload, self._job_created)
 
 
+def _ow_training_display_message(job: dict) -> str:
+    """区分阶段进度与总体进度，避免把阶段 100% 误认成全部完成。"""
+
+    status = str(job.get("status", ""))
+    raw_message = str(job.get("message", job.get("stage", "")))
+    if status != "running":
+        return raw_message
+    overall = max(0, min(100, int(job.get("progress", 0) or 0)))
+    stage = str(job.get("stage_name", "")).strip()
+    stage_progress_value = job.get("stage_progress")
+    if not stage:
+        stage_text = str(job.get("stage", ""))
+        if "SoVITS" in stage_text:
+            stage = "SoVITS"
+        elif "GPT" in stage_text:
+            stage = "GPT"
+    if stage_progress_value is None:
+        match = re.search(r"(?:SoVITS|GPT)[^\d]{0,12}(\d{1,3})%", raw_message)
+        if match is not None:
+            stage_progress_value = int(match.group(1))
+    if stage and stage_progress_value is not None:
+        stage_progress = max(0, min(100, int(stage_progress_value)))
+        stage_epoch = max(0, int(job.get("stage_epoch", 0) or 0))
+        stage_epochs = max(0, int(job.get("stage_epochs", 0) or 0))
+        epoch_progress = max(0, min(100, int(job.get("epoch_progress", 0) or 0)))
+        if stage_progress >= 100:
+            next_step = "保存阶段模型并切换到 GPT" if stage == "SoVITS" else "保存训练结果"
+            return (
+                f"{stage} 阶段已到 100%，正在{next_step}；"
+                f"整个训练尚未完成（总体进度 {overall}%）。"
+            )
+        if stage_epoch > 0 and stage_epochs > 0:
+            return (
+                f"正在训练 {stage}：第 {stage_epoch}/{stage_epochs} 轮，"
+                f"本轮 {epoch_progress}%，阶段总进度 {stage_progress}%，"
+                f"总体进度 {overall}%。"
+            )
+        if raw_message:
+            return raw_message
+        return f"正在训练 {stage}：阶段进度 {stage_progress}%，总体进度 {overall}%。"
+    return f"{raw_message}（总体进度 {overall}%）"
+
+
 def _ow_training_render_job(self, job: dict) -> None:
     self.job_status = str(job.get("status", ""))
+    if self.job_status == "interrupted":
+        # 服务重启或前端异常退出后，不能让页面继续显示旧的“正在提交/训练中”状态。
+        self._training_start_pending = False
+        self._training_start_after_engine_release = False
     self._ow_training_update_heartbeat()
     self._last_status_stage = str(job.get("stage", ""))
     files = [item for item in job.get("files", []) if isinstance(item, dict)]
@@ -3781,7 +4258,10 @@ def _ow_training_render_job(self, job: dict) -> None:
         self.transcript_table.blockSignals(False)
     progress = int(job.get("progress", 0) or 0)
     self.progress.setValue(max(0, min(100, progress)))
-    message = str(job.get("message", job.get("stage", "")))
+    self.overall_progress_label.setText(f"总体进度：{progress}%")
+    message = _ow_training_display_message(job)
+    if self.job_status == "interrupted":
+        message = "训练已中断，当前未在训练。素材和准备结果仍保留，可点击“开始训练”重新开始。"
     message = message.replace("请展开训练日志查看详情。", "请点击“训练日志”查看详情。")
     message = message.replace("请展开训练日志确认训练是否真正完成。", "请点击“训练日志”查看详情。")
     self._ow_training_set_status(message)
@@ -3820,14 +4300,29 @@ def _ow_training_send_heartbeat(self) -> None:
     if self.job_status not in {"transcribing", "preparing", "running", "cancelling"}:
         self.training_heartbeat_timer.stop()
         return
-    if not self.job_id or self.request_thread is not None:
+    if not self.job_id:
         return
-    self._request(
-        "POST",
-        "/api/training/session/heartbeat",
-        {"job_id": self.job_id},
-        lambda _result: None,
-    )
+    error = self.heartbeat_state.take_report()
+    if error:
+        self.log_view.append(f"训练心跳连续失败，正在重试：{error}")
+        self._ow_training_set_status("与训练后端的连接不稳定，正在自动重试；请暂时不要关闭程序。")
+    _ow_training_start_heartbeat(self)
+
+
+def _ow_training_start_heartbeat(self) -> None:
+    if not self.heartbeat_state.try_start():
+        return
+    threading.Thread(
+        target=_post_training_heartbeat,
+        args=(
+            self.heartbeat_state,
+            f"{self.api_url}/api/training/session/heartbeat",
+            str(self.job_id),
+            self.session_id,
+        ),
+        name="owvoice-training-heartbeat",
+        daemon=True,
+    ).start()
 
 
 def _ow_training_confirm_stop(self, action: str) -> None:
@@ -3890,6 +4385,8 @@ def _ow_training_action_started(self, job: object) -> None:
     """只有明确启动了识别、准备或训练时才切换阶段，普通刷新不导航。"""
     if isinstance(job, dict):
         self._ow_training_render_job(job)
+        if str(job.get("status", "")) == "running":
+            self._training_start_pending = False
         action = str(job.get("next_action", ""))
         if action in {"wait", "train", "save", "done"} and str(job.get("status", "")) != "transcribing":
             self._ow_training_set_step(2)
@@ -3915,25 +4412,46 @@ def _ow_training_job_created(self, job: object) -> None:
 def _ow_training_request(self, method: str, path: str, payload: dict | None, callback) -> None:
     if self.request_thread is not None:
         return
-    self.request_thread = QThread(self)
+    self._training_request_sequence += 1
+    handle = TrainingRequestHandle(self._training_request_sequence)
+    self.request_thread = handle
     self._request_path = path
-    self.request_worker = TrainingApiWorker(
-        method,
-        f"{self.api_url}{path}",
-        payload,
-        {"X-OwVoice-Session": self.session_id},
-    )
     self.request_callback = callback
-    self.request_worker.moveToThread(self.request_thread)
-    self.request_thread.started.connect(self.request_worker.run)
-    self.request_worker.loaded.connect(self._ow_training_request_loaded)
-    self.request_worker.failed.connect(self._ow_training_request_failed)
-    self.request_worker.finished.connect(self.request_thread.quit)
-    self.request_worker.finished.connect(self.request_worker.deleteLater)
-    self.request_thread.finished.connect(self._ow_training_request_finished)
-    # request_thread 由 TrainingPage 的 closeEvent 统一回收，避免失效引用。
-    self.request_thread.start()
+    threading.Thread(
+        target=_run_training_api_request,
+        args=(
+            handle,
+            self.request_bridge,
+            method,
+            f"{self.api_url}{path}",
+            payload,
+            {"X-OwVoice-Session": self.session_id},
+        ),
+        name=f"owvoice-training-api-{handle.request_id}",
+        daemon=True,
+    ).start()
     self._ow_training_set_buttons()
+
+
+def _ow_training_bridge_loaded(self, request_id: int, data: object) -> None:
+    handle = self.request_thread
+    if handle is None or handle.request_id != request_id:
+        return
+    self._ow_training_request_loaded(data)
+
+
+def _ow_training_bridge_failed(self, request_id: int, message: str) -> None:
+    handle = self.request_thread
+    if handle is None or handle.request_id != request_id:
+        return
+    self._ow_training_request_failed(message)
+
+
+def _ow_training_bridge_finished(self, request_id: int) -> None:
+    handle = self.request_thread
+    if handle is None or handle.request_id != request_id:
+        return
+    self._ow_training_request_finished()
 
 
 def _ow_training_request_loaded(self, data: object) -> None:
@@ -3948,9 +4466,10 @@ def _ow_training_request_loaded(self, data: object) -> None:
 
 def _ow_training_request_finished(self) -> None:
     finished_thread = self.request_thread
+    finished_path = str(getattr(self, "_request_path", ""))
     self.request_thread = None
     self.request_worker = None
-    # 先清空页面引用，再回收已结束的线程，避免关闭窗口时访问失效 QThread。
+    # 先清空页面引用；普通 Python 请求句柄无需 Qt 生命周期回收。
     if finished_thread is not None:
         try:
             finished_thread.deleteLater()
@@ -3960,9 +4479,30 @@ def _ow_training_request_finished(self) -> None:
         self._ow_training_set_buttons()
     except Exception as exc:  # noqa: BLE001 - 最后一道 UI 保护
         self._ow_training_frontend_error("刷新训练界面失败", exc)
+    if (
+        finished_path == "/api/engine/unload"
+        and getattr(self, "_training_start_after_engine_release", False)
+        and getattr(self, "_training_start_pending", False)
+    ):
+        # loaded 信号先于 finished 到达。必须等 request_thread 清空后再提交，
+        # 否则 _request 会把训练请求当成“已有请求”而静默跳过。
+        self._training_start_after_engine_release = False
+        QTimer.singleShot(0, lambda: _ow_training_submit_after_engine_release(self))
 
 
 def _ow_training_request_failed(self, message: str) -> None:
+    request_path = str(getattr(self, "_request_path", ""))
+    if request_path.endswith("/api/engine/unload") or request_path.endswith("/start"):
+        self._training_start_pending = False
+        self._training_start_after_engine_release = False
+    if request_path.endswith("/api/engine/unload"):
+        self._ow_training_set_status(f"无法开始训练：语音引擎释放失败。{message}。请检查后重试。")
+        self.log_view.append(f"语音引擎释放失败：{message}")
+        return
+    if request_path.endswith("/start"):
+        self._ow_training_set_status(f"训练任务未提交成功，当前没有在训练。{message}。请点击“开始训练”重试。")
+        self.log_view.append(f"训练任务提交失败：{message}")
+        return
     if str(getattr(self, "_request_path", "")) == "/api/training/session/heartbeat":
         self._ow_training_set_status(f"训练会话心跳失败：{message}")
         self._ow_training_set_buttons()
@@ -4111,7 +4651,7 @@ def _ow_training_recent_job_loaded(self, result: object) -> None:
             self._ow_training_set_status("模型已保存，可以返回工作台使用。")
     else:
         self.log_view.append("已恢复上次未完成的本地训练任务。")
-        self._ow_training_set_status("已恢复任务，可以从当前步骤继续。")
+        self._ow_training_set_status("已恢复任务；素材和有效准备结果仍保留，可重新开始当前阶段。")
     if self.job_status in {"transcribing", "preparing", "running", "cancelling"}:
         self.poll_timer.start()
     self._ow_training_set_buttons()
@@ -4156,7 +4696,8 @@ def _ow_training_retry(self) -> None:
 
 
 def _ow_training_set_buttons(self) -> None:
-    busy = self.request_thread is not None
+    start_pending = bool(getattr(self, "_training_start_pending", False))
+    busy = self.request_thread is not None or start_pending
     setup_busy = self.training_setup_thread is not None
     has_job = bool(self.job_id)
     has_files = self.file_list.count() > 0
@@ -4247,10 +4788,17 @@ def _ow_training_transcribe(self) -> None:
 
 
 def _ow_training_start_training(self) -> None:
+    if getattr(self, "_training_start_pending", False):
+        return
+    if self.job_status in {"transcribing", "preparing", "running", "cancelling"}:
+        return
+    self._training_start_pending = True
+    self._training_start_after_engine_release = False
     if not getattr(self, "_training_runtime_released", False):
         # 先让后端卸载当前角色权重，再停止 GPT-SoVITS 进程；训练只保留
         # OwVoice 后端，显著降低 8GB 显存设备上的资源峰值。
-        self._ow_training_set_status("正在释放语音引擎，为本地训练准备资源……")
+        self._ow_training_set_status("正在释放语音引擎；训练尚未开始，请勿重复点击。")
+        self._ow_training_set_buttons()
         self._request(
             "POST",
             "/api/engine/unload",
@@ -4258,16 +4806,44 @@ def _ow_training_start_training(self) -> None:
             self._ow_training_engine_released,
         )
         return
-    self._ow_training_set_status("正在启动模型训练……")
+    self._ow_training_set_status("正在提交训练任务；训练尚未开始，请勿重复点击。")
+    self._ow_training_set_buttons()
     _ow_training_original_start_training(self)
 
 
 def _ow_training_engine_released(self, _result: object) -> None:
-    self._training_runtime_released = True
     owner = self.window()
     if owner is not None and hasattr(owner, "stop_inference_service_for_training"):
+        self._ow_training_set_status("模型权重已卸载，正在停止推理进程；训练尚未开始。")
         owner.stop_inference_service_for_training()
-    self._ow_training_set_status("语音引擎已释放，正在启动模型训练……")
+        return
+    _ow_training_process_stopped(self)
+
+
+def _ow_training_process_stopped(self) -> None:
+    self._training_runtime_released = True
+    self._training_start_after_engine_release = True
+    self._ow_training_set_status("语音引擎已释放，正在提交训练任务；训练尚未开始，请勿重复点击。")
+    if self.request_thread is None:
+        QTimer.singleShot(0, lambda: _ow_training_submit_after_engine_release(self))
+
+
+def _ow_training_process_stop_failed(self, message: str) -> None:
+    self._training_start_pending = False
+    self._training_start_after_engine_release = False
+    self._ow_training_set_status(f"无法开始训练：停止推理进程失败。{message}。请检查后重试。")
+    self.log_view.append(f"停止推理进程失败：{message}")
+    self._ow_training_set_buttons()
+
+
+def _ow_training_submit_after_engine_release(self) -> None:
+    """在引擎卸载请求完整结束后，安全提交一次训练请求。"""
+    if not getattr(self, "_training_start_pending", False):
+        return
+    if self.request_thread is not None or self.job_status in {"transcribing", "preparing", "running", "cancelling"}:
+        return
+    self._ow_training_set_status("正在提交训练任务；训练尚未开始，请勿重复点击。")
+    self._ow_training_set_buttons()
     _ow_training_original_start_training(self)
 
 
@@ -4299,6 +4875,9 @@ TrainingPage._ow_training_set_step = _ow_training_set_step
 TrainingPage._ow_training_set_file_view = _ow_training_set_file_view
 TrainingPage._ow_training_update_heartbeat = _ow_training_update_heartbeat
 TrainingPage._ow_training_send_heartbeat = _ow_training_send_heartbeat
+TrainingPage._ow_training_bridge_loaded = _ow_training_bridge_loaded
+TrainingPage._ow_training_bridge_failed = _ow_training_bridge_failed
+TrainingPage._ow_training_bridge_finished = _ow_training_bridge_finished
 TrainingPage._ow_training_confirm_stop = _ow_training_confirm_stop
 TrainingPage._ow_training_wait_for_cancel_slot = _ow_training_wait_for_cancel_slot
 TrainingPage._ow_training_finish_pending_navigation = _ow_training_finish_pending_navigation
@@ -4338,6 +4917,8 @@ TrainingPage._action_started = _ow_training_action_started
 TrainingPage._transcribe = _ow_training_transcribe
 TrainingPage._start_training = _ow_training_start_training
 TrainingPage._ow_training_engine_released = _ow_training_engine_released
+TrainingPage._ow_training_process_stopped = _ow_training_process_stopped
+TrainingPage._ow_training_process_stop_failed = _ow_training_process_stop_failed
 TrainingPage._finalize = _ow_training_finalize
 TrainingPage._cancel = _ow_training_cancel
 TrainingPage.restore_latest_job = _ow_training_restore_latest_job
@@ -4366,10 +4947,29 @@ _ow_app_base_open_model_plaza = OwVoiceApp.open_model_plaza
 _ow_app_base_show_workspace = OwVoiceApp.show_workspace
 
 
+def _ow_generate_diagnostics(self) -> None:
+    self.diagnostics_button.setEnabled(False)
+    try:
+        response = requests.post(f"{self.api_url()}/api/diagnostics", timeout=30)
+        response.raise_for_status()
+        relative = str(response.json().get("file", "logs/diagnostics"))
+        QMessageBox.information(
+            self,
+            "诊断报告已生成",
+            f"报告已保存在 {relative}。\n报告不会自动上传，分享前请自行复查内容。",
+        )
+    except Exception as exc:  # noqa: BLE001 - 显示本地诊断失败原因。
+        QMessageBox.warning(self, "生成诊断报告失败", str(exc))
+    finally:
+        self.diagnostics_button.setEnabled(True)
+
+
 def _ow_app_init_with_training(self, *args, **kwargs):
     _ow_app_base_init(self, *args, **kwargs)
     self.training_page = TrainingPage(self.api_url(), self)
     self.training_page.back_requested.connect(self.show_workspace)
+    self.training_engine_stopped.connect(self.training_page._ow_training_process_stopped)
+    self.training_engine_stop_failed.connect(self.training_page._ow_training_process_stop_failed)
     # 保存本地训练模型后刷新角色，并复用模型导入后的自动启动逻辑。
     # 仅调用 load_voices 会留下“模型出现但引擎离线”的状态，重启后才恢复。
     self.training_page.model_saved.connect(self._on_models_changed)
@@ -4388,8 +4988,15 @@ def _ow_app_init_with_training(self, *args, **kwargs):
     button.clicked.connect(lambda: _ow_open_training(self))
     button.setFocusPolicy(Qt.NoFocus)
     self.training_button = button
+    diagnostics_button = QPushButton("生成诊断报告")
+    diagnostics_button.setObjectName("AboutButton")
+    diagnostics_button.setFixedHeight(40)
+    diagnostics_button.clicked.connect(lambda: _ow_generate_diagnostics(self))
+    diagnostics_button.setFocusPolicy(Qt.NoFocus)
+    self.diagnostics_button = diagnostics_button
     layout.addWidget(self.model_plaza_button)
     layout.addWidget(button)
+    layout.addWidget(diagnostics_button)
     layout.addWidget(self.about_button)
 
 

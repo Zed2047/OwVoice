@@ -99,6 +99,9 @@ def check_files(project_dir: Path, *, training: bool = False) -> dict[str, str]:
         "sovits_v4": pretrained / "gsv-v4-pretrained" / "s2Gv4.pth",
         "vocoder_v4": pretrained / "gsv-v4-pretrained" / "vocoder.pth",
         "gpt_base": pretrained / "s1v3.ckpt",
+        "nltk_tagger": project_dir / "data" / "nltk_data" / "taggers" / "averaged_perceptron_tagger",
+        "nltk_tagger_eng": project_dir / "data" / "nltk_data" / "taggers" / "averaged_perceptron_tagger_eng",
+        "nltk_cmudict": project_dir / "data" / "nltk_data" / "corpora" / "cmudict",
     }
     if training:
         required.update(
@@ -118,7 +121,10 @@ def check_files(project_dir: Path, *, training: bool = False) -> dict[str, str]:
                 "gpt_base": project_dir / "GPT-SoVITS" / "GPT_SoVITS" / "pretrained_models" / "s1v3.ckpt",
             }
         )
-    result = {name: "通过" if path.is_file() else f"缺失：{path}" for name, path in required.items()}
+    result = {
+        name: "通过" if (path.is_file() or (name.startswith("nltk_") and path.is_dir())) else f"缺失：{path}"
+        for name, path in required.items()
+    }
     full_lid = pretrained / "fast_langdetect" / "lid.176.bin"
     result["language_detection_model"] = "通过（full）" if full_lid.is_file() else "通过（lite fallback）"
     return result

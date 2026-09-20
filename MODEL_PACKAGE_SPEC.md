@@ -77,7 +77,7 @@ character.example/
 }
 ```
 
-`gpt_model`、`sovits_model` 和 `reference_audio` 是必需项；`avatar` 可省略。模型包只能包含模型和展示素材，不能通过元数据执行代码。
+`gpt_model`、`sovits_model` 和 `reference_audio` 是必需项；GPT 权重必须是 `.ckpt`，SoVITS 权重必须是 `.pth`，参考音频支持 `.wav`、`.mp3`、`.flac`、`.m4a`、`.ogg` 和 `.aac`。`prompt_language` 支持 `zh`、`yue`、`en`、`ja`、`ko`；`avatar` 可省略。`inference` 中的数值必须在程序允许范围内，非法类型或越界值会拒绝导入。模型包只能包含模型和展示素材，不能通过元数据执行代码。
 
 ## 安全规则
 
@@ -87,10 +87,10 @@ character.example/
 - 导入先写入同盘临时目录，校验通过后再移动到角色目录。
 - 当前使用中的角色不能删除；删除前提示切换角色。
 - 模型包不覆盖配置、用户数据、公共底模和其他角色。
+- `installed-models.json` 损坏时，程序保留只读诊断副本并生成恢复预览；只有用户明确确认后才会从一级模型目录中的合法 `model.json` 重建注册表。
 
 ## 更新规则
 
-- 同一个 `id` 按 `version` 比较，更新只替换该角色目录。
-- 如果 `minAppVersion` 或 `minEngineVersion` 不满足，先更新程序/引擎，再允许模型更新。
+- 当前本地模型库不提供联网模型更新；`minAppVersion` 和 `minEngineVersion` 只作为模型兼容性元数据保留，不触发联网下载。
 - 模型重新导入失败不应破坏旧版本。
-- 保留上一个可用版本，更新失败时回滚。
+- 重新导入同 ID 模型不会静默覆盖现有模型；需要替换时应保留原目录备份并按导入提示操作。

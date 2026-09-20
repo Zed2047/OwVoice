@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "python": {
+    "implementation": "CPython",
+    "version": "3.10.10",
+    "version_range": ">=3.10,<3.11",
+    "compatible_major_minor": "3.10",
+    "tested_versions": ["3.10.10", "3.10.21"],
+    "architecture": "x64",
+    "source": "existing-system"
+  },
+  "dependencies": {
+    "pyproject_sha256": "3e1c5817ca6c359f6a15670759551c04dbdec525520ac1c3e197c0c4563db9ab",
+    "lock_sha256": "e0f004c11a6838c1b629180d94f23109cffa771c757311bc956c9bdc38ad31f4",
+    "modes": ["CPU", "GPU"],
+    "training_extra": "training"
+  },
+  "resources": {
+    "schema": 2,
+    "lock_file": "resource-lock.json"
+  },
+  "estimated_download_bytes": {
+    "cpu": 3221225472,
+    "gpu": 6442450944,
+    "training_extra": 1610612736
+  },
+  "minimum_temporary_space_bytes": {
+    "cpu": 16106127360,
+    "gpu": 25769803776
+  },
+  "tools": {
+    "uv_version": "0.12.12",
+    "uv_sha256": "efb9599543b26b3ea5adc1649bef69788633d9cc25c6cfd97b799e4dfa0c2cfb"
+  }
+}

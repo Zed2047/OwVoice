@@ -8,21 +8,21 @@ $scriptDirectories = @(
     (Join-Path $root "scripts"),
     (Join-Path $root "updater")
 )
-$batchFiles = @(
-    Get-ChildItem -LiteralPath $root -Filter *.bat -File
-    foreach ($directory in $scriptDirectories) {
-        if (Test-Path -LiteralPath $directory -PathType Container) {
-            Get-ChildItem -LiteralPath $directory -Filter *.bat -Recurse -File
-        }
+$batchFiles = @()
+foreach ($directory in @($root) + $scriptDirectories) {
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) { continue }
+    foreach ($pattern in @("*.bat", "*.cmd")) {
+        $search = if ($directory -eq $root) { Get-ChildItem -LiteralPath $directory -Filter $pattern -File } else { Get-ChildItem -LiteralPath $directory -Filter $pattern -Recurse -File }
+        $batchFiles += @($search)
     }
-)
-$files = @(
-    foreach ($directory in $scriptDirectories) {
-        if (Test-Path -LiteralPath $directory -PathType Container) {
-            Get-ChildItem -LiteralPath $directory -Filter *.ps1 -Recurse -File
-        }
+}
+$files = @()
+foreach ($directory in $scriptDirectories) {
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) { continue }
+    foreach ($pattern in @("*.ps1", "*.psm1", "*.psd1")) {
+        $files += @(Get-ChildItem -LiteralPath $directory -Filter $pattern -Recurse -File)
     }
-)
+}
 $failures = New-Object System.Collections.Generic.List[string]
 foreach ($file in $batchFiles) {
     $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
@@ -50,6 +50,18 @@ foreach ($file in $files) {
     [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
     if ($parseErrors.Count -gt 0) {
         [void]$failures.Add("PowerShell 语法错误：$($file.FullName)（$($parseErrors.Count) 个）")
+    }
+}
+foreach ($moduleFile in ($files | Where-Object { $_.Extension -in @(".psm1", ".psd1") })) {
+    $loadedModules = @()
+    try {
+        $loadedModules = @(Import-Module -Name $moduleFile.FullName -Force -PassThru -ErrorAction Stop)
+    } catch {
+        [void]$failures.Add("PowerShell 模块导入失败：$($moduleFile.FullName)（$($_.Exception.Message)）")
+    } finally {
+        foreach ($loadedModule in $loadedModules) {
+            Remove-Module -ModuleInfo $loadedModule -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 if ($failures.Count -gt 0) {

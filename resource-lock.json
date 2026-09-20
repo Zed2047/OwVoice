@@ -1,62 +1,113 @@
 {
-  "schema": 1,
-  "ffmpeg": {
-    "version": "9.0.1",
-    "url": "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.1-essentials_build.zip",
-    "sha256": "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9",
-    "license": "GPL-3.0",
-    "source": "https://www.gyan.dev/ffmpeg/builds/"
-  },
-  "g2pw": {
-    "revision": "827f4a519b083e3f37c790c938300241e75692d5",
-    "url": "https://www.modelscope.cn/models/kamiorinn/g2pw/resolve/827f4a519b083e3f37c790c938300241e75692d5/G2PWModel_1.1.zip",
-    "size_bytes": 588857174,
-    "sha256": "b116f6930a7ee55eef6576a8d8e14bf40c1106583439e8ae924b901512379c64",
-    "license": "Apache-2.0",
-    "source": "https://www.modelscope.cn/models/kamiorinn/g2pw"
-  },
-  "fasttext": {
-    "url": "https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin",
-    "size_bytes": 131266198,
-    "sha256": "7e69ec5451bc261cc7844e49e4792a85d7f09c06789ec800fc4a44aec362764e",
-    "license": "CC-BY-SA-3.0 (model); MIT (fastText code)",
-    "source": "https://github.com/facebookresearch/fastText"
-  },
-  "pretrained": {
-    "repo": "lj1995/GPT-SoVITS",
-    "revision": "336b2ec4e8d4ac74740798dd40af44e74659ecaf",
-    "source": "https://huggingface.co/lj1995/GPT-SoVITS",
-    "license": "MIT",
-    "files": {
-      "s1v3.ckpt": {"size_bytes": 155284856, "sha256": "87133414860ea14ff6620c483a3db5ed07b44be42e2c3fcdad65523a729a745a"},
-      "chinese-hubert-base/config.json": {"size_bytes": 1449, "sha256": "c3e5060a1277e0f078cc6be9da4528a605dba6ece93018981fe2c820e5c7b103"},
-      "chinese-hubert-base/preprocessor_config.json": {"size_bytes": 212, "sha256": "dcd684124d06722947939d41ea6ae58dbf10968c60a11a29f23ddc602c64a29b"},
-      "chinese-hubert-base/pytorch_model.bin": {"size_bytes": 188811417, "sha256": "24164f129c66499d1346e2aa55f183250c223161ec2770c0da3d3b08cf432d3c"},
-      "chinese-roberta-wwm-ext-large/config.json": {"size_bytes": 963, "sha256": "3d57de2fd7e80d0e5c8ff194f0bbb6baa10df7e43fc262a0cc71298a78b0a3e5"},
-      "chinese-roberta-wwm-ext-large/pytorch_model.bin": {"size_bytes": 651225145, "sha256": "e53a693acc59ace251d143d068096ae0d7b79e4b1b503fa84c9dcf576448c1d8"},
-      "chinese-roberta-wwm-ext-large/tokenizer.json": {"size_bytes": 268962, "sha256": "173796956820ea27bd14f76bf28162607ff4254807e2948253eb5b46f5bb643b"},
-      "gsv-v4-pretrained/s2Gv4.pth": {"size_bytes": 769025545, "sha256": "906fe22f48c3e037a389df291d4d32a9414e15dbb8f9628643e83aaced109ea4"},
-      "gsv-v4-pretrained/vocoder.pth": {"size_bytes": 57781109, "sha256": "4d611913df7b12d49e8976c944558d2d096816365edfc6c35a9e85b67dd14ed9"},
-      "sv/pretrained_eres2netv2w24s4ep4.ckpt": {"size_bytes": 107528697, "sha256": "4f5a0bf73c61eb41b174e1bb54e7ee3c83233892be8e0af1f187024e8e581a35"},
-      "v2Pro/s2Gv2Pro.pth": {"size_bytes": 162303657, "sha256": "0f8ead815234365edf045c6d86370ed6e4f440e8195be77ff0ea72684ad406a5"},
-      "v2Pro/s2Dv2Pro.pth": {"size_bytes": 126431971, "sha256": "257a7f36ae49e9ff08790d2cd3d398592530852caba810197f8606e884a52c54"}
-    }
-  },
-  "nltk": {
-    "averaged_perceptron_tagger": {
-      "url": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/taggers/averaged_perceptron_tagger.zip",
-      "sha256": "e1f13cf2532daadfd6f3bc481a49859f0b8ea6432ccdcd83e6a49a5f19008de9",
-      "license": "MIT"
+  "schema": 2,
+  "resources": [
+    {
+      "id": "ffmpeg-9.0.1-essentials",
+      "version": "9.0.1",
+      "required_for": ["inference", "training"],
+      "sources": [{"url": "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.1-essentials_build.zip", "kind": "primary"}],
+      "archive": {"size_bytes": 111253802, "sha256": "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9", "format": "zip"},
+      "installed_files": [
+        {"path": "ffmpeg.exe", "size_bytes": 102856192, "sha256": "72a489eccd008c2ec2c0a5856c5c75bc3d8bbfa90166c4566865c246445e6aa3"},
+        {"path": "ffprobe.exe", "size_bytes": 102652416, "sha256": "19202b23c0043f15ad1b7bce2344f406fd52bd6efd8f995ce02e7392a1cec52f"}
+      ],
+      "target": "GPT-SoVITS",
+      "license": "GPL-3.0",
+      "source_page": "https://www.gyan.dev/ffmpeg/builds/"
     },
-    "averaged_perceptron_tagger_eng": {
-      "url": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/taggers/averaged_perceptron_tagger_eng.zip",
-      "sha256": "6025f530624335c67d6547d44757b357b4e79bae030a0383e9887a92c1718f0b",
-      "license": "MIT"
+    {
+      "id": "g2pw-1.1",
+      "version": "1.1",
+      "revision": "827f4a519b083e3f37c790c938300241e75692d5",
+      "required_for": ["inference", "training"],
+      "sources": [{"url": "https://www.modelscope.cn/models/kamiorinn/g2pw/resolve/827f4a519b083e3f37c790c938300241e75692d5/G2PWModel_1.1.zip", "kind": "primary"}],
+      "archive": {"size_bytes": 588857174, "sha256": "b116f6930a7ee55eef6576a8d8e14bf40c1106583439e8ae924b901512379c64", "format": "zip"},
+      "installed_files": [{"path": "g2pW.onnx", "size_bytes": 635212732, "sha256": "2eb3c71fd95117b2e1abef8d2d0cd78aae894bbe7f0fac105ddc9c32ce63cbd0"}],
+      "target": "GPT-SoVITS/GPT_SoVITS/text/G2PWModel",
+      "license": "Apache-2.0",
+      "source_page": "https://www.modelscope.cn/models/kamiorinn/g2pw"
     },
-    "cmudict": {
-      "url": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/corpora/cmudict.zip",
-      "sha256": "d07cca47fd72ad32ea9d8ad1219f85301eeaf4568f8b6b73747506a71fb5afd6",
-      "license": "CMU unrestricted research and commercial use"
+    {
+      "id": "fasttext-lid-176",
+      "version": "lid.176",
+      "required_for": [],
+      "status": "optional_acceleration",
+      "sources": [{"url": "https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin", "kind": "primary"}],
+      "archive": {"size_bytes": 131266198, "sha256": "7e69ec5451bc261cc7844e49e4792a85d7f09c06789ec800fc4a44aec362764e", "format": "bin"},
+      "installed_files": [{"path": "lid.176.bin", "size_bytes": 131266198, "sha256": "7e69ec5451bc261cc7844e49e4792a85d7f09c06789ec800fc4a44aec362764e"}],
+      "target": "GPT-SoVITS/GPT_SoVITS/pretrained_models/fast_langdetect",
+      "fallback": {"id": "fasttext-lite", "provider": "fast_langdetect", "status": "lite", "verification": "package built-in model"},
+      "license": "CC-BY-SA-3.0 (model); MIT (fastText code)",
+      "source_page": "https://github.com/facebookresearch/fastText"
+    },
+    {
+      "id": "gpt-sovits-pretrained",
+      "version": "snapshot",
+      "revision": "336b2ec4e8d4ac74740798dd40af44e74659ecaf",
+      "repo_id": "lj1995/GPT-SoVITS",
+      "required_for": ["inference", "training"],
+      "sources": [{"url": "https://huggingface.co", "kind": "primary"}, {"url": "https://hf-mirror.com", "kind": "mirror"}],
+      "artifact": {"format": "huggingface_snapshot"},
+      "installed_files": [
+        {"path": "s1v3.ckpt", "size_bytes": 155284856, "sha256": "87133414860ea14ff6620c483a3db5ed07b44be42e2c3fcdad65523a729a745a"},
+        {"path": "chinese-hubert-base/config.json", "size_bytes": 1449, "sha256": "c3e5060a1277e0f078cc6be9da4528a605dba6ece93018981fe2c820e5c7b103"},
+        {"path": "chinese-hubert-base/preprocessor_config.json", "size_bytes": 212, "sha256": "dcd684124d06722947939d41ea6ae58dbf10968c60a11a29f23ddc602c64a29b"},
+        {"path": "chinese-hubert-base/pytorch_model.bin", "size_bytes": 188811417, "sha256": "24164f129c66499d1346e2aa55f183250c223161ec2770c0da3d3b08cf432d3c"},
+        {"path": "chinese-roberta-wwm-ext-large/config.json", "size_bytes": 963, "sha256": "3d57de2fd7e80d0e5c8ff194f0bbb6baa10df7e43fc262a0cc71298a78b0a3e5"},
+        {"path": "chinese-roberta-wwm-ext-large/pytorch_model.bin", "size_bytes": 651225145, "sha256": "e53a693acc59ace251d143d068096ae0d7b79e4b1b503fa84c9dcf576448c1d8"},
+        {"path": "chinese-roberta-wwm-ext-large/tokenizer.json", "size_bytes": 268962, "sha256": "173796956820ea27bd14f76bf28162607ff4254807e2948253eb5b46f5bb643b"},
+        {"path": "gsv-v4-pretrained/s2Gv4.pth", "size_bytes": 769025545, "sha256": "906fe22f48c3e037a389df291d4d32a9414e15dbb8f9628643e83aaced109ea4"},
+        {"path": "gsv-v4-pretrained/vocoder.pth", "size_bytes": 57781109, "sha256": "4d611913df7b12d49e8976c944558d2d096816365edfc6c35a9e85b67dd14ed9"},
+        {"path": "sv/pretrained_eres2netv2w24s4ep4.ckpt", "size_bytes": 107528697, "sha256": "4f5a0bf73c61eb41b174e1bb54e7ee3c83233892be8e0af1f187024e8e581a35", "required_for": ["training"]},
+        {"path": "v2Pro/s2Gv2Pro.pth", "size_bytes": 162303657, "sha256": "0f8ead815234365edf045c6d86370ed6e4f440e8195be77ff0ea72684ad406a5", "required_for": ["training"]},
+        {"path": "v2Pro/s2Dv2Pro.pth", "size_bytes": 126431971, "sha256": "257a7f36ae49e9ff08790d2cd3d398592530852caba810197f8606e884a52c54", "required_for": ["training"]}
+      ],
+      "target": "GPT-SoVITS/GPT_SoVITS/pretrained_models",
+      "license": "MIT",
+      "source_page": "https://huggingface.co/lj1995/GPT-SoVITS"
+    },
+    {
+      "id": "nltk-averaged-perceptron-tagger",
+      "package_name": "averaged_perceptron_tagger",
+      "version": "nltk-data",
+      "required_for": ["inference", "training"],
+      "sources": [{"url": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/taggers/averaged_perceptron_tagger.zip", "kind": "primary"}],
+      "archive": {"size_bytes": 2526731, "sha256": "e1f13cf2532daadfd6f3bc481a49859f0b8ea6432ccdcd83e6a49a5f19008de9", "format": "zip"},
+      "installed_files": [{"path": "taggers/averaged_perceptron_tagger/averaged_perceptron_tagger.pickle", "size_bytes": 6138625, "sha256": "25a5a19c7ced7b2bac3831da5bc0afcc2c34e5dd01cd4f361bb799949a696238"}],
+      "target": "data/nltk_data",
+      "license": "MIT",
+      "source_page": "https://github.com/nltk/nltk_data"
+    },
+    {
+      "id": "nltk-averaged-perceptron-tagger-eng",
+      "package_name": "averaged_perceptron_tagger_eng",
+      "version": "nltk-data",
+      "required_for": ["inference", "training"],
+      "sources": [{"url": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/taggers/averaged_perceptron_tagger_eng.zip", "kind": "primary"}],
+      "archive": {"size_bytes": 1539115, "sha256": "6025f530624335c67d6547d44757b357b4e79bae030a0383e9887a92c1718f0b", "format": "zip"},
+      "installed_files": [
+        {"path": "taggers/averaged_perceptron_tagger_eng/averaged_perceptron_tagger_eng.classes.json", "size_bytes": 285, "sha256": "d152ffa69d45b8357276341a3d592c6c025911d52ec0d9068d4f382560dd48b6"},
+        {"path": "taggers/averaged_perceptron_tagger_eng/averaged_perceptron_tagger_eng.tagdict.json", "size_bytes": 25788, "sha256": "4c713731cb06727736962bc8cd94ad919217a040e76691059af99bc0c2c9c246"},
+        {"path": "taggers/averaged_perceptron_tagger_eng/averaged_perceptron_tagger_eng.weights.json", "size_bytes": 5677744, "sha256": "789e8e35f6fac656d9b7eccea29ba4e8a137cbb5b525dd31f39e4291a9e80832"}
+      ],
+      "target": "data/nltk_data",
+      "license": "MIT",
+      "source_page": "https://github.com/nltk/nltk_data"
+    },
+    {
+      "id": "nltk-cmudict",
+      "package_name": "cmudict",
+      "version": "nltk-data",
+      "required_for": ["inference", "training"],
+      "sources": [{"url": "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/corpora/cmudict.zip", "kind": "primary"}],
+      "archive": {"size_bytes": 896069, "sha256": "d07cca47fd72ad32ea9d8ad1219f85301eeaf4568f8b6b73747506a71fb5afd6", "format": "zip"},
+      "installed_files": [
+        {"path": "corpora/cmudict/cmudict", "size_bytes": 3820830, "sha256": "cad209c39eb87677d64e93d97f8eed10b7e6f9bdd42de8e7ca8efc8e17d62e8a"},
+        {"path": "corpora/cmudict/README", "size_bytes": 3808, "sha256": "b0556be7a2b12bea6a667277b75864f802dd4854480657ce298c62e6897e766b"}
+      ],
+      "target": "data/nltk_data",
+      "license": "CMU unrestricted research and commercial use",
+      "source_page": "https://github.com/nltk/nltk_data"
     }
-  }
+  ]
 }

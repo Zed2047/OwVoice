@@ -40,9 +40,11 @@ class DownloadPretrainedTests(unittest.TestCase):
         module = load_download_module()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with patch.object(module, "TARGET_DIR", root), patch.object(module, "download_file", side_effect=RuntimeError("network unavailable")):
+            with patch.object(module, "TARGET_DIR", root), patch.object(module, "RESOURCE_STATE_PATH", root / "resource-state.json"), patch.object(module, "download_file", side_effect=RuntimeError("network unavailable")):
                 self.assertFalse(module.ensure_fasttext_lid())
             self.assertFalse((root / "fast_langdetect" / "lid.176.bin").exists())
+            state = (root / "resource-state.json").read_text(encoding="utf-8")
+            self.assertIn('"mode": "lite"', state)
 
     def test_safe_extract_rejects_directory_traversal(self):
         module = load_download_module()

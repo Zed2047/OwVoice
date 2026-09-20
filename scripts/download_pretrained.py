@@ -7,12 +7,16 @@ import shutil
 import subprocess
 import zipfile
 import argparse
-import time
-import hashlib
-import json
+import sys
 from pathlib import Path
 
-import requests
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from resource_lock import installed_file_map, index_resources, load_resource_lock as read_resource_lock, primary_source
+from resource_download import download_file, download_from_sources, ensure_zip_download, file_matches, safe_extract_all
+from resource_state import update_resource_state
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -21,36 +25,35 @@ ENGINE_DIR = PROJECT_DIR / "GPT-SoVITS"
 TEXT_DIR = ENGINE_DIR / "GPT_SoVITS" / "text"
 DOWNLOAD_DIR = PROJECT_DIR / ".cache" / "setup-downloads"
 RESOURCE_LOCK_PATH = PROJECT_DIR / "resource-lock.json"
+RESOURCE_STATE_PATH = PROJECT_DIR / ".runtime" / "resource-state.json"
 
 
 def load_resource_lock() -> dict:
-    try:
-        lock = json.loads(RESOURCE_LOCK_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"资源锁文件无效：{RESOURCE_LOCK_PATH}") from exc
-    if lock.get("schema") != 1:
-        raise RuntimeError(f"不支持的资源锁 schema：{lock.get('schema')}")
-    return lock
+    return read_resource_lock(RESOURCE_LOCK_PATH)
 
 
 RESOURCE_LOCK = load_resource_lock()
-FFMPEG_INFO = RESOURCE_LOCK["ffmpeg"]
-G2PW_INFO = RESOURCE_LOCK["g2pw"]
-FASTTEXT_INFO = RESOURCE_LOCK["fasttext"]
-PRETRAINED_INFO = RESOURCE_LOCK["pretrained"]
-FFMPEG_URL = FFMPEG_INFO["url"]
+RESOURCE_BY_ID = index_resources(RESOURCE_LOCK)
+FFMPEG_INFO = RESOURCE_BY_ID["ffmpeg-9.0.1-essentials"]
+G2PW_INFO = RESOURCE_BY_ID["g2pw-1.1"]
+FASTTEXT_INFO = RESOURCE_BY_ID["fasttext-lid-176"]
+PRETRAINED_INFO = RESOURCE_BY_ID["gpt-sovits-pretrained"]
+FFMPEG_URL = primary_source(FFMPEG_INFO)
 FFMPEG_VERSION = FFMPEG_INFO["version"]
-FFMPEG_ARCHIVE_SHA256 = FFMPEG_INFO["sha256"]
-G2PW_URL = G2PW_INFO["url"]
-G2PW_ARCHIVE_SIZE = G2PW_INFO["size_bytes"]
-G2PW_ARCHIVE_SHA256 = G2PW_INFO["sha256"]
-G2PW_ONNX_SIZE = 635212732
-G2PW_ONNX_SHA256 = "2eb3c71fd95117b2e1abef8d2d0cd78aae894bbe7f0fac105ddc9c32ce63cbd0"
-DEFAULT_PRETRAINED_REPO = PRETRAINED_INFO["repo"]
+FFMPEG_ARCHIVE_SIZE = FFMPEG_INFO["archive"]["size_bytes"]
+FFMPEG_ARCHIVE_SHA256 = FFMPEG_INFO["archive"]["sha256"]
+FFMPEG_FILE_CHECKS = installed_file_map(FFMPEG_INFO)
+G2PW_URL = primary_source(G2PW_INFO)
+G2PW_ARCHIVE_SIZE = G2PW_INFO["archive"]["size_bytes"]
+G2PW_ARCHIVE_SHA256 = G2PW_INFO["archive"]["sha256"]
+G2PW_FILE_CHECKS = installed_file_map(G2PW_INFO)
+G2PW_ONNX_SIZE, G2PW_ONNX_SHA256 = next(iter(G2PW_FILE_CHECKS.values()))
+DEFAULT_PRETRAINED_REPO = PRETRAINED_INFO["repo_id"]
 DEFAULT_PRETRAINED_REVISION = PRETRAINED_INFO["revision"]
-FASTTEXT_LID_URL = FASTTEXT_INFO["url"]
-FASTTEXT_LID_SIZE = FASTTEXT_INFO["size_bytes"]
-FASTTEXT_LID_SHA256 = FASTTEXT_INFO["sha256"]
+PRETRAINED_FILES = installed_file_map(PRETRAINED_INFO)
+FASTTEXT_LID_URL = primary_source(FASTTEXT_INFO)
+FASTTEXT_LID_SIZE = FASTTEXT_INFO["archive"]["size_bytes"]
+FASTTEXT_LID_SHA256 = FASTTEXT_INFO["archive"]["sha256"]
 TRAINING_RELATIVE_FILES = {
     "sv/pretrained_eres2netv2w24s4ep4.ckpt",
     "v2Pro/s2Gv2Pro.pth",
@@ -58,26 +61,16 @@ TRAINING_RELATIVE_FILES = {
 }
 REQUIRED_FILES = tuple(
     TARGET_DIR / relative
-    for relative in PRETRAINED_INFO["files"]
+    for relative in PRETRAINED_FILES
     if relative not in TRAINING_RELATIVE_FILES
 )
 TRAINING_REQUIRED_FILES = tuple(TARGET_DIR / relative for relative in sorted(TRAINING_RELATIVE_FILES))
 REQUIRED_FILE_CHECKS = {
-    TARGET_DIR / relative: (info["size_bytes"], info["sha256"])
-    for relative, info in PRETRAINED_INFO["files"].items()
+    TARGET_DIR / relative: check
+    for relative, check in PRETRAINED_FILES.items()
 }
-ALLOW_PATTERNS = [
-    "s1v3.ckpt",
-    "chinese-hubert-base/**",
-    "chinese-roberta-wwm-ext-large/**",
-    "gsv-v4-pretrained/s2Gv4.pth",
-    "gsv-v4-pretrained/vocoder.pth",
-]
-TRAINING_ALLOW_PATTERNS = [
-    "sv/pretrained_eres2netv2w24s4ep4.ckpt",
-    "v2Pro/s2Gv2Pro.pth",
-    "v2Pro/s2Dv2Pro.pth",
-]
+ALLOW_PATTERNS = [relative for relative in PRETRAINED_FILES if relative not in TRAINING_RELATIVE_FILES]
+TRAINING_ALLOW_PATTERNS = sorted(TRAINING_RELATIVE_FILES)
 
 
 def ready(*, training: bool = False) -> bool:
@@ -90,126 +83,6 @@ def ready(*, training: bool = False) -> bool:
             if not file_matches(path, expected_size=size, expected_sha256=sha256):
                 return False
     return True
-
-
-def file_matches(target: Path, *, expected_size: int | None = None, expected_sha256: str | None = None) -> bool:
-    if not target.is_file():
-        return False
-    if expected_size is not None and target.stat().st_size != expected_size:
-        return False
-    if expected_sha256 is not None:
-        digest = hashlib.sha256()
-        with target.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest().lower() == expected_sha256.lower()
-    return True
-
-
-def download_file(
-    url: str,
-    target: Path,
-    *,
-    attempts: int = 4,
-    expected_size: int | None = None,
-    expected_sha256: str | None = None,
-) -> None:
-    """可靠下载单个文件，避免网络中断留下伪完整目标文件。
-
-    保留 ``.part`` 文件并优先使用 HTTP Range 续传；服务器不支持续传时
-    自动从头下载。只有完整响应写入成功后才替换最终目标文件。
-    """
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    partial = target.with_name(target.name + ".part")
-    print(f"Downloading {url}...")
-    last_error: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        offset = partial.stat().st_size if partial.is_file() else 0
-        headers = {"Range": f"bytes={offset}-"} if offset else {}
-        try:
-            with requests.get(url, headers=headers, stream=True, timeout=(15, 60)) as response:
-                # 服务器拒绝续传，丢弃旧分片并在本轮从头写入。
-                if offset and response.status_code == 200:
-                    partial.unlink(missing_ok=True)
-                    offset = 0
-                elif offset and response.status_code == 416:
-                    partial.unlink(missing_ok=True)
-                    raise RuntimeError("服务器拒绝当前下载分片，已准备重新下载")
-                response.raise_for_status()
-                if offset and response.status_code != 206:
-                    raise RuntimeError(f"服务器未返回续传响应：HTTP {response.status_code}")
-
-                expected = response.headers.get("Content-Length")
-                expected_bytes = int(expected) if expected and expected.isdigit() else None
-                mode = "ab" if offset else "wb"
-                received = 0
-                with partial.open(mode) as handle:
-                    for chunk in response.iter_content(chunk_size=1024 * 1024):
-                        if chunk:
-                            handle.write(chunk)
-                            received += len(chunk)
-                if expected_bytes is not None and received != expected_bytes:
-                    raise RuntimeError(
-                        f"下载内容不完整：本次收到 {received} 字节，应为 {expected_bytes} 字节"
-                    )
-            if not file_matches(partial, expected_size=expected_size, expected_sha256=expected_sha256):
-                raise RuntimeError("下载文件校验失败：文件大小或 SHA256 不匹配")
-            partial.replace(target)
-            return
-        except (OSError, requests.RequestException, ValueError, RuntimeError) as exc:
-            last_error = exc
-            if attempt >= attempts:
-                break
-            delay = min(2 ** (attempt - 1), 8)
-            print(f"Download interrupted (attempt {attempt}/{attempts}): {exc}; retrying in {delay}s...")
-            time.sleep(delay)
-    raise RuntimeError(f"下载失败：{url}\n{last_error}") from last_error
-
-
-def ensure_zip_download(
-    url: str,
-    target: Path,
-    *,
-    expected_size: int | None = None,
-    expected_sha256: str | None = None,
-) -> None:
-    """下载并验证 ZIP；已有损坏缓存会自动重新下载。"""
-
-    if target.is_file():
-        try:
-            if not file_matches(target, expected_size=expected_size, expected_sha256=expected_sha256):
-                raise OSError("ZIP 大小或 SHA256 不匹配")
-            with zipfile.ZipFile(target) as package:
-                if package.testzip() is not None:
-                    raise zipfile.BadZipFile("ZIP 内部文件校验失败")
-            return
-        except (OSError, zipfile.BadZipFile):
-            target.unlink(missing_ok=True)
-    download_file(url, target, expected_size=expected_size, expected_sha256=expected_sha256)
-    try:
-        with zipfile.ZipFile(target) as package:
-            if package.testzip() is not None:
-                raise zipfile.BadZipFile("ZIP 内部文件校验失败")
-    except (OSError, zipfile.BadZipFile) as exc:
-        target.unlink(missing_ok=True)
-        raise RuntimeError(f"下载的压缩包无效：{target}") from exc
-
-
-def safe_extract_all(package: zipfile.ZipFile, destination: Path) -> None:
-    """拒绝绝对路径、目录穿越和链接条目，再解压到指定临时目录。"""
-
-    root = destination.resolve()
-    for info in package.infolist():
-        mode = (info.external_attr >> 16) & 0xFFFF
-        if mode and (mode & 0o170000) == 0o120000:
-            raise RuntimeError(f"压缩包包含不安全链接：{info.filename}")
-        output = (destination / info.filename).resolve()
-        try:
-            output.relative_to(root)
-        except ValueError as exc:
-            raise RuntimeError(f"压缩包包含不安全路径：{info.filename}") from exc
-    package.extractall(destination)
 
 
 def ffmpeg_works(path: Path, *, expected_version: str = FFMPEG_VERSION) -> bool:
@@ -239,10 +112,12 @@ def ffprobe_works(path: Path, *, expected_version: str = FFMPEG_VERSION) -> bool
 def ensure_ffmpeg() -> None:
     ffmpeg = ENGINE_DIR / "ffmpeg.exe"
     ffprobe = ENGINE_DIR / "ffprobe.exe"
-    if ffmpeg_works(ffmpeg) and ffprobe_works(ffprobe):
+    if (file_matches(ffmpeg, expected_size=FFMPEG_FILE_CHECKS["ffmpeg.exe"][0], expected_sha256=FFMPEG_FILE_CHECKS["ffmpeg.exe"][1]) and
+            file_matches(ffprobe, expected_size=FFMPEG_FILE_CHECKS["ffprobe.exe"][0], expected_sha256=FFMPEG_FILE_CHECKS["ffprobe.exe"][1]) and
+            ffmpeg_works(ffmpeg) and ffprobe_works(ffprobe)):
         return
     archive = DOWNLOAD_DIR / "ffmpeg-essentials.zip"
-    ensure_zip_download(FFMPEG_URL, archive, expected_sha256=FFMPEG_ARCHIVE_SHA256)
+    ensure_zip_download(FFMPEG_URL, archive, expected_size=FFMPEG_ARCHIVE_SIZE, expected_sha256=FFMPEG_ARCHIVE_SHA256)
     print("Extracting ffmpeg...")
     with zipfile.ZipFile(archive) as package:
         names = package.namelist()
@@ -254,7 +129,9 @@ def ensure_ffmpeg() -> None:
             with package.open(matches[0]) as source, temporary.open("wb") as target:
                 shutil.copyfileobj(source, target)
             temporary.replace(destination)
-    if not ffmpeg_works(ffmpeg) or not ffprobe_works(ffprobe):
+    if (not file_matches(ffmpeg, expected_size=FFMPEG_FILE_CHECKS["ffmpeg.exe"][0], expected_sha256=FFMPEG_FILE_CHECKS["ffmpeg.exe"][1]) or
+            not file_matches(ffprobe, expected_size=FFMPEG_FILE_CHECKS["ffprobe.exe"][0], expected_sha256=FFMPEG_FILE_CHECKS["ffprobe.exe"][1]) or
+            not ffmpeg_works(ffmpeg) or not ffprobe_works(ffprobe)):
         raise RuntimeError("ffmpeg 解压完成但无法运行；压缩包可能损坏或不兼容当前 Windows。")
 
 
@@ -298,6 +175,7 @@ def ensure_fasttext_lid() -> bool:
 
     target = TARGET_DIR / "fast_langdetect" / "lid.176.bin"
     if file_matches(target, expected_size=FASTTEXT_LID_SIZE, expected_sha256=FASTTEXT_LID_SHA256):
+        update_resource_state(RESOURCE_STATE_PATH, FASTTEXT_INFO["id"], mode="full", revision=str(FASTTEXT_INFO["version"]))
         print(f"fastText language model already exists: {target}")
         return True
     if target.exists():
@@ -309,21 +187,29 @@ def ensure_fasttext_lid() -> bool:
     elif os.environ.get("OWVOICE_LID_URL"):
         print("忽略 OWVOICE_LID_URL：正式安装默认只允许资源锁中的固定来源。")
     last_error = None
-    for url in urls:
-        try:
-            print(f"Downloading fastText language model from {url}...")
-            download_file(
-                url,
-                target,
-                attempts=4,
-                expected_size=FASTTEXT_LID_SIZE,
-                expected_sha256=FASTTEXT_LID_SHA256,
-            )
-            print("fastText language model is ready.")
-            return True
-        except Exception as exc:  # noqa: BLE001 - 继续尝试备用源并允许轻量模型降级
-            last_error = exc
-            print(f"fastText language model download failed: {exc}")
+    try:
+        print(f"Downloading fastText language model from {urls[0]}...")
+        download_from_sources(
+            urls,
+            target,
+            attempts=4,
+            expected_size=FASTTEXT_LID_SIZE,
+            expected_sha256=FASTTEXT_LID_SHA256,
+            download_func=download_file,
+        )
+        update_resource_state(RESOURCE_STATE_PATH, FASTTEXT_INFO["id"], mode="full", revision=str(FASTTEXT_INFO["version"]))
+        print("fastText language model is ready.")
+        return True
+    except Exception as exc:  # noqa: BLE001 - 继续尝试备用源并允许轻量模型降级
+        last_error = exc
+        print(f"fastText language model download failed: {exc}")
+    update_resource_state(
+        RESOURCE_STATE_PATH,
+        FASTTEXT_INFO["id"],
+        mode="lite",
+        reason="完整 fastText 模型下载或校验失败；使用 fast_langdetect 内置轻量模型。",
+        revision=str(FASTTEXT_INFO["version"]),
+    )
     print(
         "警告：完整语言检测模型下载失败，将使用 fast_langdetect 自带的轻量模型。"
         f" 如需补下载，可重新运行 setup.bat。原因：{last_error}"
@@ -363,28 +249,28 @@ def download(*, training: bool = False) -> None:
             print("忽略未固定的预训练资源覆盖；正式安装使用 resource-lock.json。")
         repo_id = requested_repo if allow_unpinned and requested_repo else DEFAULT_PRETRAINED_REPO
         revision = requested_revision if allow_unpinned and requested_revision else DEFAULT_PRETRAINED_REVISION
-        print(f"Downloading GPT-SoVITS assets from {repo_id}...")
-        endpoints = []
+        print(f"正在准备 GPT-SoVITS 资源：{repo_id}。下载期间会复用已完成文件，请勿关闭窗口。")
+        endpoints = [str(source["url"]) for source in PRETRAINED_INFO["sources"]]
         if allow_unpinned and os.environ.get("HF_ENDPOINT"):
-            endpoints.append(os.environ["HF_ENDPOINT"])
-        endpoints.extend([None, "https://hf-mirror.com"])
+            endpoints.insert(0, os.environ["HF_ENDPOINT"])
         last_error = None
         for endpoint in endpoints:
             try:
+                print(f"正在连接资源源：{endpoint or 'https://huggingface.co'}")
                 kwargs = {
                     "repo_id": repo_id,
                     "revision": revision,
                     "allow_patterns": ALLOW_PATTERNS + (TRAINING_ALLOW_PATTERNS if training else []),
                     "local_dir": str(TARGET_DIR),
                 }
-                if endpoint:
-                    kwargs["endpoint"] = endpoint
+                kwargs["endpoint"] = endpoint
                 snapshot_download(**kwargs)
                 if not ready(training=training):
                     required = REQUIRED_FILES + (TRAINING_REQUIRED_FILES if training else ())
                     missing = [str(path.relative_to(TARGET_DIR)) for path in required if not path.is_file()]
                     raise RuntimeError("下载源返回成功但资源仍缺失：" + ", ".join(missing))
                 verify_pretrained_files(training=training)
+                print("GPT-SoVITS 资源下载和校验完成。")
                 last_error = None
                 break
             except Exception as exc:

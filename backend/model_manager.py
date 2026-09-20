@@ -8,6 +8,7 @@ import re
 import shutil
 import tempfile
 import unicodedata
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -15,16 +16,29 @@ from backend.model_catalog import (
     InstalledModel,
     ModelCatalogError,
     get_character_root,
+    get_model_catalog_lock,
     load_installed_models,
     register_installed_model,
     save_installed_models,
     validate_model_id,
 )
+from backend.atomic_json import write_json_atomic
 from backend.text_encoding import read_text_compat
 
 
 class ModelManagerError(RuntimeError):
     """模型操作失败。"""
+
+
+def _catalog_transaction(method):
+    """让同一项目的模型文件与注册表变更处于同一临界区。"""
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._catalog_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapped
 
 
 class ModelManager:
@@ -37,7 +51,9 @@ class ModelManager:
         del index_url
         self.project_dir = Path(project_dir).resolve()
         self.character_root = get_character_root(self.project_dir)
-        self._migrate_legacy_model_dirs()
+        self._catalog_lock = get_model_catalog_lock(self.project_dir)
+        with self._catalog_lock:
+            self._migrate_legacy_model_dirs()
 
     def _model_root(self, model: InstalledModel) -> Path:
         path = Path(model.path)
@@ -47,6 +63,11 @@ class ModelManager:
         if not isinstance(metadata, dict) or str(metadata.get("id", model_id)) != model_id:
             raise ModelManagerError("model.json 的 id 无效")
         root = model_root.resolve()
+        extensions = {
+            "gpt_model": {".ckpt"},
+            "sovits_model": {".pth"},
+            "reference_audio": {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac", ".wma"},
+        }
         for field in ("gpt_model", "sovits_model", "reference_audio"):
             value = str(metadata.get(field, "")).strip()
             if not value or Path(value).is_absolute() or ":" in value:
@@ -54,9 +75,36 @@ class ModelManager:
             resolved = (root / value).resolve()
             if root not in resolved.parents or not resolved.is_file():
                 raise ModelManagerError(f"模型文件不存在或路径非法：{field}")
+            if resolved.suffix.casefold() not in extensions[field]:
+                allowed = "、".join(sorted(extensions[field]))
+                raise ModelManagerError(f"model.json 的 {field} 文件类型无效，仅支持 {allowed}")
+        prompt_language = str(metadata.get("prompt_language", "zh")).strip().lower()
+        if prompt_language not in {"zh", "yue", "en", "ja", "ko"}:
+            raise ModelManagerError("model.json 的 prompt_language 无效")
         inference = metadata.get("inference", {})
         if inference is not None and not isinstance(inference, dict):
             raise ModelManagerError("model.json 的 inference 必须是对象")
+        if isinstance(inference, dict):
+            ranges = {
+                "top_k": (int, 1, 100),
+                "top_p": (float, 0.0, 1.0),
+                "temperature": (float, 0.0, 2.0),
+                "sample_steps": (int, 4, 128),
+            }
+            for field, (converter, minimum, maximum) in ranges.items():
+                if field not in inference:
+                    continue
+                try:
+                    converted = converter(inference[field])
+                except (TypeError, ValueError) as exc:
+                    raise ModelManagerError(f"model.json 的 inference.{field} 类型无效") from exc
+                lower_valid = converted > minimum if field in {"top_p", "temperature"} else converted >= minimum
+                if not lower_valid or converted > maximum:
+                    raise ModelManagerError(f"model.json 的 inference.{field} 超出允许范围")
+            if "cut_punc" in inference and (
+                not isinstance(inference["cut_punc"], str) or len(inference["cut_punc"]) > 64
+            ):
+                raise ModelManagerError("model.json 的 inference.cut_punc 无效")
         avatar = str(metadata.get("avatar", "")).strip()
         if avatar:
             resolved = (root / avatar).resolve()
@@ -97,20 +145,45 @@ class ModelManager:
     ) -> dict[str, Any]:
         """登记已经位于 data/models 一级目录中的模型，不复制大文件。"""
 
+        metadata_path = source / "model.json"
+        avatar_path = source / "avatar.svg"
+        original_metadata: bytes | None = None
+        metadata_existed = metadata_path.exists()
+        avatar_existed = avatar_path.exists()
         try:
             if metadata_changed:
-                if metadata.get("avatar") == "avatar.svg":
-                    _ow_write_default_avatar(source / "avatar.svg", metadata.get("name", metadata["id"]))
-                (source / "model.json").write_text(
-                    json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8",
-                )
+                if metadata_existed:
+                    original_metadata = metadata_path.read_bytes()
+                if metadata.get("avatar") == "avatar.svg" and not avatar_existed:
+                    _ow_write_default_avatar(avatar_path, metadata.get("name", metadata["id"]))
+                write_json_atomic(metadata_path, metadata)
             model = self._model_record(metadata, source)
             register_installed_model(self.project_dir, model)
             return {**model.to_dict(), **metadata, "installed": True, "source": "local"}
         except (OSError, ModelCatalogError) as exc:
+            rollback_errors: list[str] = []
+            if original_metadata is not None:
+                try:
+                    metadata_path.write_bytes(original_metadata)
+                except OSError as rollback_exc:
+                    rollback_errors.append(f"model.json 恢复失败：{rollback_exc}")
+            elif not metadata_existed and metadata_path.exists():
+                try:
+                    metadata_path.unlink()
+                except OSError as rollback_exc:
+                    rollback_errors.append(f"临时 model.json 清理失败：{rollback_exc}")
+            if not avatar_existed and avatar_path.exists():
+                try:
+                    avatar_path.unlink()
+                except OSError as rollback_exc:
+                    rollback_errors.append(f"临时头像清理失败：{rollback_exc}")
+            if rollback_errors:
+                raise ModelManagerError(
+                    f"无法登记模型目录：{source}（{exc}）；且回滚不完整：{'；'.join(rollback_errors)}"
+                ) from exc
             raise ModelManagerError(f"无法登记模型目录：{source}（{exc}）") from exc
 
+    @_catalog_transaction
     def list_models(self, refresh: bool = False) -> list[dict[str, Any]]:
         del refresh
         result: list[dict[str, Any]] = []
@@ -147,6 +220,7 @@ class ModelManager:
         """兼容旧接口；公开版只返回本地模型，不联网。"""
         return {"models": self.list_models()}
 
+    @_catalog_transaction
     def import_model(self, source_dir: str | Path) -> dict[str, Any]:
         source = Path(source_dir).expanduser().resolve()
         if not source.is_dir():
@@ -176,6 +250,18 @@ class ModelManager:
                     metadata_changed = True
         except (OSError, UnicodeError, json.JSONDecodeError, ModelCatalogError) as exc:
             raise ModelManagerError(f"模型元数据无效：{exc}") from exc
+
+        return self._commit_model_import(source, metadata, metadata_changed)
+
+    def _commit_model_import(
+        self,
+        source: Path,
+        metadata: dict[str, Any],
+        metadata_changed: bool,
+    ) -> dict[str, Any]:
+        """提交已校验模型；调用方必须持有模型目录事务锁。"""
+
+        model_id = str(metadata["id"])
         try:
             registered_models = load_installed_models(self.project_dir)
         except ModelCatalogError as exc:
@@ -219,25 +305,47 @@ class ModelManager:
             )
         staging_parent = Path(tempfile.mkdtemp(prefix="owvoice-model-staging-", dir=self.character_root))
         staging = staging_parent / model_id
+        installed_target = False
         try:
             shutil.copytree(source, staging)
             if metadata_changed:
-                if metadata.get("avatar") == "avatar.svg":
+                if metadata.get("avatar") == "avatar.svg" and not (staging / "avatar.svg").exists():
                     _ow_write_default_avatar(staging / "avatar.svg", metadata.get("name", model_id))
-                (staging / "model.json").write_text(
-                    json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8",
-                )
+                write_json_atomic(staging / "model.json", metadata)
             staging.rename(target)
+            installed_target = True
             model = self._model_record(metadata, target)
             register_installed_model(self.project_dir, model)
             return {**model.to_dict(), **metadata, "installed": True, "source": "local"}
         except (OSError, ModelCatalogError) as exc:
-            if target.exists():
-                shutil.rmtree(target, ignore_errors=True)
+            rollback_error = None
+            if installed_target and target.exists():
+                try:
+                    shutil.rmtree(target)
+                except OSError as cleanup_exc:
+                    rollback_error = cleanup_exc
+            if rollback_error is not None:
+                raise ModelManagerError(
+                    f"导入模型失败：{exc}；且临时目标目录清理失败：{target}（{rollback_error}）"
+                ) from exc
             raise ModelManagerError(f"导入模型失败：{exc}") from exc
         finally:
             shutil.rmtree(staging_parent, ignore_errors=True)
+
+    @_catalog_transaction
+    def _import_generated_package(
+        self,
+        source: Path,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        """为训练输出补元数据后直接提交，避免大权重经过两次完整复制。"""
+
+        try:
+            self._validate_package_files(source)
+            self._validate_metadata(metadata, str(metadata["id"]), source)
+        except (OSError, UnicodeError, ModelCatalogError) as exc:
+            raise ModelManagerError(f"模型元数据无效：{exc}") from exc
+        return self._commit_model_import(source, metadata, metadata_changed=True)
 
     def _discover_model_sources(self, source_dir: str | Path) -> list[Path]:
         """识别单个模型包，或集合目录下的一级模型包目录。"""
@@ -292,6 +400,7 @@ class ModelManager:
         del model_id, active_model_id
         raise ModelManagerError("OwVoice 不提供模型联网更新，请导入或重新训练本地模型")
 
+    @_catalog_transaction
     def remove_model(self, model_id: str, active_model_id: str | None = None) -> None:
         validate_model_id(model_id)
         if active_model_id == model_id:
@@ -308,6 +417,7 @@ class ModelManager:
         # 之后仍可通过导入/重新登记恢复到模型库。
         save_installed_models(self.project_dir, [item for item in models if item.id != model_id])
 
+    @_catalog_transaction
     def rename_model(self, model_id: str, new_name: str, active_model_id: str | None = None) -> dict[str, Any]:
         """安全修改模型显示名称和可读目录名，内部 ID 永远保持不变。"""
 
@@ -337,9 +447,9 @@ class ModelManager:
             raise ModelManagerError("模型目录不存在或不在本地模型目录内")
         metadata_path = root / "model.json"
         try:
-            original_metadata_text = read_text_compat(metadata_path)
-            metadata = json.loads(original_metadata_text)
-        except (OSError, json.JSONDecodeError) as exc:
+            original_metadata = metadata_path.read_bytes()
+            metadata = json.loads(read_text_compat(metadata_path))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ModelManagerError(f"模型配置文件无法读取：{metadata_path}") from exc
         if not isinstance(metadata, dict) or str(metadata.get("id", model_id)) != model_id:
             raise ModelManagerError("模型配置中的内部 ID 无效")
@@ -370,18 +480,27 @@ class ModelManager:
                 root.rename(target)
                 moved = True
             metadata_path = target / "model.json"
-            metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            write_json_atomic(metadata_path, metadata)
             save_installed_models(
                 self.project_dir,
                 [renamed if item.id == model_id else item for item in models],
             )
         except (OSError, ModelCatalogError) as exc:
+            rollback_errors: list[str] = []
+            rollback_metadata_path = target / "model.json" if target.exists() else root / "model.json"
             try:
-                if target != root and target.exists():
-                    metadata_path.write_text(original_metadata_text, encoding="utf-8")
+                rollback_metadata_path.write_bytes(original_metadata)
+            except OSError as rollback_exc:
+                rollback_errors.append(f"model.json 恢复失败：{rollback_exc}")
+            if moved and target.exists():
+                try:
                     target.rename(root)
-            except OSError:
-                pass
+                except OSError as rollback_exc:
+                    rollback_errors.append(f"目录恢复失败：{rollback_exc}")
+            if rollback_errors:
+                raise ModelManagerError(
+                    f"重命名模型失败：{exc}；且回滚不完整：{'；'.join(rollback_errors)}"
+                ) from exc
             raise ModelManagerError(f"重命名模型失败，已尝试恢复原目录：{exc}") from exc
         return {**renamed.to_dict(), **metadata, "installed": True, "source": "local"}
 
@@ -454,7 +573,11 @@ ModelManager._migrate_legacy_model_dirs = _ow_migrate_legacy_model_dirs
 
 _ow_structured_import = ModelManager.import_model
 
-def _ow_import_training_output(self, source_dir: str | Path) -> dict[str, Any]:
+def _ow_import_training_output(
+    self,
+    source_dir: str | Path,
+    selected_files: dict[str, str] | None = None,
+) -> dict[str, Any]:
     source = Path(source_dir).expanduser().resolve()
     if (source / "model.json").is_file():
         return _ow_structured_import(self, source)
@@ -463,28 +586,36 @@ def _ow_import_training_output(self, source_dir: str | Path) -> dict[str, Any]:
     wav_files = sorted(source.rglob("*.wav")) if source.is_dir() else []
     if not gpt_files or not sovits_files or not wav_files:
         return _ow_structured_import(self, source)
+    selected_files = selected_files or {}
+
+    def select(key: str, label: str, candidates: list[Path]) -> Path:
+        if len(candidates) == 1:
+            return candidates[0]
+        selected_value = str(selected_files.get(key, "")).strip()
+        selected = Path(selected_value).expanduser().resolve() if selected_value else None
+        if selected is None or selected not in [item.resolve() for item in candidates]:
+            raise ModelManagerError(f"训练目录包含多个 {label} 候选文件，请明确选择后再导入。")
+        return selected
+
+    selected_gpt = select("gpt", "GPT", gpt_files)
+    selected_sovits = select("sovits", "SoVITS", sovits_files)
+    selected_wav = select("reference", "参考音频", wav_files)
     model_id = re.sub(r"[^a-zA-Z0-9._-]+", "-", source.name).strip("-._") or "local-model"
     validate_model_id(model_id[:64])
-    temp_root = Path(tempfile.mkdtemp(prefix="owvoice-import-"))
-    package = temp_root / model_id
-    try:
-        shutil.copytree(source, package)
-        def relative_name(path: Path) -> str:
-            return str(path.relative_to(source)).replace("\\", "/")
-        metadata = {
-            "id": model_id[:64],
-            "name": source.name,
-            "version": "0.0.0",
-            "gpt_model": relative_name(gpt_files[0]),
-            "sovits_model": relative_name(sovits_files[0]),
-            "reference_audio": relative_name(wav_files[0]),
-            "prompt_text": "",
-            "prompt_language": "zh",
-            "license_note": "用户本地导入；请自行确认授权。",
-        }
-        (package / "model.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-        return _ow_structured_import(self, package)
-    finally:
-        shutil.rmtree(temp_root, ignore_errors=True)
+    def relative_name(path: Path) -> str:
+        return str(path.relative_to(source)).replace("\\", "/")
+
+    metadata = {
+        "id": model_id[:64],
+        "name": source.name,
+        "version": "0.0.0",
+        "gpt_model": relative_name(selected_gpt),
+        "sovits_model": relative_name(selected_sovits),
+        "reference_audio": relative_name(selected_wav),
+        "prompt_text": "",
+        "prompt_language": "zh",
+        "license_note": "用户本地导入；请自行确认授权。",
+    }
+    return self._import_generated_package(source, metadata)
 
 ModelManager.import_model = _ow_import_training_output

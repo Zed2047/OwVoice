@@ -12,6 +12,12 @@ $compatibilityScript = Join-Path $PSScriptRoot "verify_text_compatibility.ps1"
 $windowsPowerShell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
 & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $compatibilityScript -ProjectRoot $projectRoot
 if ($LASTEXITCODE -ne 0) { throw "文本兼容性检查失败，已停止发布包构建。" }
+$pythonGate = (Get-Command python -ErrorAction SilentlyContinue).Source
+if ([string]::IsNullOrWhiteSpace($pythonGate)) { throw "找不到用于执行发布门禁的 Python。" }
+& $pythonGate (Join-Path $PSScriptRoot "verify_resource_lock.py") --project-root $projectRoot
+if ($LASTEXITCODE -ne 0) { throw "资源锁门禁失败，已停止发布包构建。" }
+& $pythonGate (Join-Path $PSScriptRoot "verify_dependency_closure.py") --project-root $projectRoot
+if ($LASTEXITCODE -ne 0) { throw "依赖闭包门禁失败，已停止发布包构建。" }
 . (Join-Path $PSScriptRoot "release_common.ps1")
 $releaseIdentity = Get-OwVoiceReleaseIdentity -ProjectRoot $projectRoot -ValidateMirrors
 $Version = Resolve-OwVoiceReleaseTag -Identity $releaseIdentity -RequestedVersion $Version
@@ -47,7 +53,7 @@ function Copy-EngineTree([string]$sourceDirectory, [string]$targetDirectory) {
     }
 }
 
-foreach ($file in @("README.md", "CHANGELOG.md", "MODEL_PACKAGE_SPEC.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "version.json", "resource-lock.json", "release-layout.json", "pyproject.toml", "uv.lock", "requirements-cpu.txt", "requirements-gpu.txt", "requirements-training.txt")) {
+foreach ($file in @("README.md", "CHANGELOG.md", "MODEL_PACKAGE_SPEC.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "version.json", "resource-lock.json", "environment-spec.json", "dependency-contract.json", "release-layout.json", "pyproject.toml", "uv.lock", "requirements-cpu.txt", "requirements-gpu.txt", "requirements-training.txt")) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $file) -Destination $releasePackagePath
 }
 # 发布 ZIP 使用 ASCII 文件名，避免 Windows 压缩工具处理中文文件名时产生乱码。
@@ -70,9 +76,10 @@ Get-ChildItem -LiteralPath (Join-Path $projectRoot "assets") -Force | Where-Obje
 # Release 只复制首次配置所需脚本，构建和调试脚本留在源码仓库。
 $releaseScriptsTargetPath = Join-Path $releasePackagePath "scripts"
 New-Item -ItemType Directory -Force -Path $releaseScriptsTargetPath | Out-Null
-foreach ($scriptName in @("setup_v2.ps1", "check_env.ps1", "download_pretrained.py", "verify_runtime.py", "setup_training.ps1", "download_nltk_data.py", "update_release.ps1", "update_transaction.ps1", "repair_update_legacy.ps1", "release_common.ps1", "start_training.ps1")) {
+foreach ($scriptName in @("setup_v2.ps1", "check_env.ps1", "download_pretrained.py", "resource_download.py", "resource_state.py", "verify_runtime.py", "verify_dependency_closure.py", "verify_resource_lock.py", "resource_lock.py", "setup_training.ps1", "download_nltk_data.py", "update_release.ps1", "update_transaction.ps1", "process_lifecycle.ps1", "repair_update_legacy.ps1", "release_common.ps1", "start_training.ps1")) {
     Copy-Item -LiteralPath (Join-Path (Join-Path $projectRoot "scripts") $scriptName) -Destination $releaseScriptsTargetPath -Force
 }
+Copy-Item -LiteralPath (Join-Path $projectRoot "scripts\environment") -Destination $releaseScriptsTargetPath -Recurse -Force
 
 # 内置固定版本、带签名且经过哈希校验的 uv；用户无需预装 Python 或配置 PATH。
 $uvSource = Join-Path $projectRoot "tools\uv\uv.exe"
@@ -222,7 +229,15 @@ if ($null -ne $tar) {
 }
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $releaseArchivePath).Hash.ToLowerInvariant()
 $size = (Get-Item -LiteralPath $releaseArchivePath).Length
-$manifestPath = Join-Path $releaseOutputPath "release-manifest-v2-$Version.json"
-$manifestJson = [PSCustomObject]@{ schema=2; version=$Version; archive_name=(Split-Path -Leaf $releaseArchivePath); sha256=$hash; size_bytes=$size } | ConvertTo-Json
-[System.IO.File]::WriteAllText($manifestPath, $manifestJson, (New-Object System.Text.UTF8Encoding($false)))
+$manifestPath = Join-Path $releaseOutputPath "update.json"
+$legacyManifestPath = Join-Path $releaseOutputPath "release-manifest-v3-$Version.json"
+if (Test-Path -LiteralPath $legacyManifestPath -PathType Leaf) {
+    Remove-Item -LiteralPath $legacyManifestPath -Force
+}
+& $pythonGate (Join-Path $PSScriptRoot "build_release_manifest.py") `
+    --project-root $projectRoot `
+    --archive $releaseArchivePath `
+    --output $manifestPath `
+    --version $Version
+if ($LASTEXITCODE -ne 0) { throw "update.json 生成失败。" }
 Write-Host ("Release ZIP complete: {0} MB, SHA256: {1}" -f [Math]::Round($size / 1MB, 1), $hash) -ForegroundColor Green

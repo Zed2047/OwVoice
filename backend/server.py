@@ -17,11 +17,20 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from backend.app_version import get_app_version
-from backend.model_catalog import ModelCatalogError, get_character_root, load_installed_models
+from backend.model_catalog import (
+    ModelCatalogError,
+    get_catalog_recovery_status,
+    get_character_root,
+    load_installed_models,
+    recover_installed_models,
+)
 from backend.model_manager import ModelManager, ModelManagerError
 from backend.training_errors import TrainingError
 from backend.update_manager import UpdateManager, UpdateManagerError
 from backend.text_encoding import read_text_compat
+from backend.update_health import inspect_update_health
+from backend.diagnostics import create_diagnostic_report
+from backend.error_reporting import report_user_error
 
 
 PROJECT_DIR = Path(os.environ.get("OWVOICE_PROJECT_DIR", Path(__file__).resolve().parents[1]))
@@ -33,7 +42,7 @@ if not CONFIG_PATH.is_absolute():
     CONFIG_PATH = PROJECT_DIR / CONFIG_PATH
 GSV_API = os.environ.get("OWVOICE_GSV_API", "http://127.0.0.1:9880").rstrip("/")
 MODEL_MANAGER = ModelManager(PROJECT_DIR, os.environ.get("OWVOICE_MODEL_INDEX_URL"))
-UPDATE_MANAGER = UpdateManager(APP_VERSION)
+UPDATE_MANAGER = UpdateManager(APP_VERSION, project_root=PROJECT_DIR)
 
 app = FastAPI(title="OwVoice API", version=APP_VERSION)
 _model_lock = threading.Lock()
@@ -41,6 +50,29 @@ _synthesis_lock = threading.Lock()
 _active_model_key: str | None = None
 _active_voice_id: str | None = None
 _selected_voice_id: str | None = None
+
+
+def _reported_http_error(
+    exc: BaseException,
+    *,
+    code: str,
+    module: str,
+    status_code: int,
+    impact: str,
+    advice: str,
+) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail=report_user_error(
+            PROJECT_DIR,
+            code=code,
+            module=module,
+            reason=str(exc),
+            impact=impact,
+            advice=advice,
+            exception=exc,
+        ),
+    )
 
 
 def _training_manager():
@@ -99,6 +131,10 @@ class TrainingTranscriptRequest(BaseModel):
 
 class ModelRenameRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
+
+
+class ModelCatalogRecoveryRequest(BaseModel):
+    confirmed: bool = False
 
 
 def load_voices() -> list[dict[str, Any]]:
@@ -366,6 +402,7 @@ def inference_params(request: SynthesizeRequest, voice: dict[str, Any]) -> dict[
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
+    update_health = inspect_update_health(PROJECT_DIR)
     return {
         "status": "ok",
         "owvoice": True,
@@ -375,7 +412,21 @@ def health() -> dict[str, Any]:
         "gpt_sovits_api": GSV_API,
         "active_voice_id": _active_voice_id,
         "selected_voice_id": _selected_voice_id,
+        "update_health": update_health,
+        "ready_for_update_commit": update_health["ok"],
     }
+
+
+@app.post("/api/diagnostics")
+def generate_diagnostics() -> dict[str, str]:
+    try:
+        report = create_diagnostic_report(PROJECT_DIR, version=APP_VERSION)
+        return {
+            "status": "created",
+            "file": str(report.relative_to(PROJECT_DIR)).replace("\\", "/"),
+        }
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"生成本地诊断报告失败：{exc}") from exc
 
 
 @app.post("/api/training/session/heartbeat")
@@ -395,15 +446,40 @@ def check_updates() -> dict[str, Any]:
     try:
         return UPDATE_MANAGER.check()
     except UpdateManagerError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise _reported_http_error(
+            exc,
+            code="UPDATE-201",
+            module="backend",
+            status_code=503,
+            impact="本次检查已停止，当前版本和用户数据未改变。",
+            advice="检查网络后重试，或稍后手动检查更新。",
+        ) from exc
 @app.get("/api/models")
 def models(refresh: bool = False) -> list[dict[str, Any]]:
     """返回本地模型清单；公开版不联网，也不提供远程模型下载。"""
 
     try:
         return MODEL_MANAGER.list_models(refresh=refresh)
+    except ModelCatalogError:
+        # 损坏注册表不能阻止主界面和模型库打开；恢复必须走单独确认接口。
+        return []
+
+
+@app.get("/api/models/recovery")
+def model_catalog_recovery() -> dict[str, Any]:
+    try:
+        return get_catalog_recovery_status(PROJECT_DIR)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"无法保存模型注册表诊断副本：{exc}") from exc
+
+
+@app.post("/api/models/recovery")
+def rebuild_model_catalog(request: ModelCatalogRecoveryRequest) -> dict[str, Any]:
+    try:
+        models = recover_installed_models(PROJECT_DIR, confirmed=request.confirmed)
+        return {"status": "recovered", "count": len(models)}
     except ModelCatalogError as exc:
-        raise HTTPException(status_code=500, detail=f"无法读取本地模型注册表：{exc}") from exc
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/models/refresh")
@@ -457,8 +533,8 @@ def voices() -> list[dict[str, Any]]:
             item["availability"] = availability(voice)
             result.append(item)
         return result
-    except ModelCatalogError as exc:
-        raise HTTPException(status_code=500, detail=f"无法读取本地模型注册表：{exc}") from exc
+    except ModelCatalogError:
+        return []
 
 
 @app.post("/api/voices/{voice_id}/select")
@@ -561,14 +637,26 @@ class LocalModelImportRequest(BaseModel):
     """本地目录导入请求；路径只在桌面端本机解析。"""
 
     source_dir: str = Field(min_length=1, max_length=1000)
+    selected_files: dict[str, str] | None = None
 
 
 @app.post("/api/models/import")
 def import_local_model(request: LocalModelImportRequest) -> dict[str, Any]:
     try:
-        result = MODEL_MANAGER.import_models(request.source_dir)
+        if request.selected_files:
+            model = MODEL_MANAGER.import_model(request.source_dir, request.selected_files)
+            result = {"imported": [model], "skipped": [], "failed": []}
+        else:
+            result = MODEL_MANAGER.import_models(request.source_dir)
     except ModelManagerError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise _reported_http_error(
+            exc,
+            code="MODEL-201",
+            module="backend",
+            status_code=400,
+            impact="该模型未导入，已有模型和文件未删除。",
+            advice="按提示检查 model.json 和模型文件后重试。",
+        ) from exc
     if not result["imported"] and not result["skipped"]:
         details = "\n".join(f"{item['source']}：{item['error']}" for item in result["failed"])
         raise HTTPException(status_code=400, detail=f"没有成功导入任何模型。\n{details}")
@@ -591,7 +679,14 @@ def create_training_job(request: TrainingCreateRequest) -> dict[str, Any]:
             request.avatar_path,
         )
     except TrainingError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise _reported_http_error(
+            exc,
+            code="TRAIN-201",
+            module="training",
+            status_code=400,
+            impact="训练任务未开始，已存在的素材不会被删除。",
+            advice="按提示修正素材或释放空间后重试。",
+        ) from exc
 
 
 @app.get("/api/training/environment")
@@ -738,7 +833,14 @@ def finalize_training_job(job_id: str) -> dict[str, Any]:
     try:
         return _training_manager().finalize(job_id)
     except TrainingError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise _reported_http_error(
+            exc,
+            code="TRAIN-401",
+            module="training",
+            status_code=400,
+            impact="模型尚未完成入库，训练任务和恢复材料仍保留。",
+            advice="检查训练日志和权重归属后重新保存。",
+        ) from exc
 
 
 @app.get("/api/training/status")
