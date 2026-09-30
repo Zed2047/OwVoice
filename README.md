@@ -20,6 +20,14 @@ OwVoice 是一个守望先锋角色本地语音合成工具，使用 GPT-SoVITS 
   <a href="#合成音频示例">试听合成示例</a>
 </p>
 
+<p align="center">
+  <a href="https://afdian.com/a/Zed123">
+    <img src="https://img.shields.io/badge/%E7%88%B1%E5%8F%91%E7%94%B5-%E6%94%AF%E6%8C%81_OwVoice-946CE6?style=for-the-badge" alt="在爱发电支持 OwVoice">
+  </a>
+</p>
+
+> OwVoice 会一直免费更新，也会推出更多模型。想支持项目的话，欢迎请我喝杯咖啡，赞助完全自愿，不赞助也能完整使用工具。谢谢你！每一份支持都会用于项目维护和后续更新。
+
 ## 快速了解
 
 ### 主要能力
